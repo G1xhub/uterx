@@ -1,0 +1,84 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/uterx-core",
+    "crates/uterx-render",
+    "crates/uterx-mux",
+    "crates/uterx-ui",
+    "crates/uterx-plugin",
+    "crates/uterx-platform",
+    "crates/uterx-app",
+    "xtask",
+    # Plugins (native crates — compiled to WASM separately)
+    # Uncomment as plugins are created:
+    # "plugins/bluetooth",
+    # "plugins/mesh-chat",
+    # "plugins/midnight",
+    # "plugins/editor",
+    # "plugins/file-sharing",
+    # "plugins/network-tools",
+    # "plugins/ssh-tools",
+    # "plugins/converter",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourname/uterx"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Terminal IO
+crossterm = "0.28"
+portable-pty = "0.8"
+
+# TUI
+ratatui = "0.29"
+
+# GPU Rendering
+wgpu = "24"
+fontdue = "0.9"
+
+# VTE parsing
+vte = "0.13"
+
+# Plugin runtime
+wasmtime = "29"
+
+# Crypto
+ring = "0.17"
+
+# Config / Serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Networking
+reqwest = { version = "0.12", features = ["json"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Internal crates
+uterx-core = { path = "crates/uterx-core" }
+uterx-render = { path = "crates/uterx-render" }
+uterx-mux = { path = "crates/uterx-mux" }
+uterx-ui = { path = "crates/uterx-ui" }
+uterx-plugin = { path = "crates/uterx-plugin" }
+uterx-platform = { path = "crates/uterx-platform" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

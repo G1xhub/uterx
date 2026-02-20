@@ -1,0 +1,13 @@
+[package]
+name = "uterx-render"
+description = "GPU-accelerated terminal renderer via wgpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+uterx-core = { workspace = true }
+wgpu = { workspace = true }
+fontdue = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }

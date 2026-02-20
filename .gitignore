@@ -1,0 +1,34 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock für Binary-Projekte sollte normalerweise eingecheckt werden.
+# Für Libraries sollte Cargo.lock ignoriert werden.
+# Dieses Projekt ist ein Binary (App), daher: Cargo.lock NICHT ignorieren
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Build artifacts
+/dist/
+/build/
+/out/
+
+# WASM (für Plugins)
+*.wasm

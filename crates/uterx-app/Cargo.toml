@@ -1,0 +1,28 @@
+[package]
+name = "uterx"
+description = "uterx — Terminal Desktop: modular, extensible terminal emulator and multiplexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "uterx"
+path = "src/main.rs"
+
+[dependencies]
+uterx-core = { workspace = true }
+uterx-render = { path = "../uterx-render" }
+uterx-mux = { path = "../uterx-mux" }
+uterx-ui = { path = "../uterx-ui" }
+uterx-plugin = { path = "../uterx-plugin" }
+uterx-platform = { path = "../uterx-platform" }
+
+tokio = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

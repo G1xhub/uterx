@@ -1,0 +1,13 @@
+[package]
+name = "uterx-mux"
+description = "Terminal multiplexer: panes, tabs, sessions, layouts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+uterx-core = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
