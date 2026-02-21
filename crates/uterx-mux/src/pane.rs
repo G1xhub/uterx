@@ -27,6 +27,8 @@ pub struct Pane {
     pub grid: Grid,
     pub parser: Parser,
     pub focused: bool,
+    /// If true, this pane is floating (absolute position, rendered on top).
+    pub is_floating: bool,
     /// PTY process — owns the writer and master handle.
     pty: Option<PtyProcess>,
     /// Channel receiving output from the PTY reader task.
@@ -69,6 +71,7 @@ impl Pane {
             grid,
             parser,
             focused: false,
+            is_floating: false,
             pty: Some(pty),
             pty_rx: Some(rx),
         })
@@ -84,6 +87,7 @@ impl Pane {
             grid,
             parser: Parser::new(),
             focused: false,
+            is_floating: false,
             pty: None,
             pty_rx: None,
         }
@@ -121,6 +125,11 @@ impl Pane {
         if let Some(pty) = self.pty.as_ref() {
             let _ = pty.resize(rect.width, rect.height);
         }
+    }
+
+    /// Toggle floating state.
+    pub fn toggle_float(&mut self) {
+        self.is_floating = !self.is_floating;
     }
 
     /// Check if the PTY reader channel is still open.

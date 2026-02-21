@@ -12,3 +12,4 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }

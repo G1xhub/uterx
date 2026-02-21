@@ -32,3 +32,10 @@ Thumbs.db
 
 # WASM (für Plugins)
 *.wasm
+
+# AI
+.claude
+PLAN.md
+GEMINI.md
+CLAUDE.md
+skills/

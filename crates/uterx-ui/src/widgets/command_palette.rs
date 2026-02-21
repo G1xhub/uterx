@@ -38,6 +38,8 @@ pub fn default_commands() -> Vec<CommandEntry> {
         CommandEntry::new("Focus Previous Pane", "Alt+Left", "Move focus to previous pane"),
         CommandEntry::new("Toggle Broadcast", "Alt+B", "Type in all panes simultaneously"),
         CommandEntry::new("File Browser", "Ctrl+E", "Toggle file explorer sidebar"),
+        CommandEntry::new("Search Files", "/", "Search files in explorer (open sidebar first)"),
+        CommandEntry::new("Toggle Floating", "Alt+F", "Float/unfloat focused pane"),
         CommandEntry::new("Help", "F1", "Show help & keybindings"),
         CommandEntry::new("Command Palette", "Ctrl+P", "Open this command palette"),
         CommandEntry::new("Quit", "Ctrl+Q", "Exit uterx"),

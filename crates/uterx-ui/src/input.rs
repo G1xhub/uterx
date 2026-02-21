@@ -26,6 +26,8 @@ pub enum Action {
     CommandPalette,
     /// Toggle file browser sidebar.
     ToggleFileBrowser,
+    /// Toggle focused pane between tiled and floating.
+    ToggleFloat,
     /// Open a folder in a new pane (cd into it).
     OpenFolder(String),
     /// Pass raw input to the active pane's PTY.
@@ -123,6 +125,11 @@ impl InputHandler {
         bindings.insert(
             KeyBinding { code: KeyCode::Char('e'), modifiers: KeyModifiers::CONTROL },
             Action::ToggleFileBrowser,
+        );
+        // Alt+F = Toggle floating pane
+        bindings.insert(
+            KeyBinding { code: KeyCode::Char('f'), modifiers: KeyModifiers::ALT },
+            Action::ToggleFloat,
         );
 
         Self { bindings }

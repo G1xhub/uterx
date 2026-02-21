@@ -23,7 +23,7 @@ pub struct FsEntry {
     pub is_symlink: bool,
 }
 
-/// File browser state — tracks cwd, entries, cursor, scroll.
+/// File browser state — tracks cwd, entries, cursor, scroll, and search.
 #[derive(Debug, Clone)]
 pub struct FileBrowserState {
     pub root: PathBuf,
@@ -32,6 +32,15 @@ pub struct FileBrowserState {
     pub scroll_offset: usize,
     pub visible: bool,
     pub width: u16,
+    // ── Search ──
+    pub search_mode: bool,
+    pub search_query: String,
+    /// false = local (in current entries), true = recursive (walk subtree)
+    pub search_recursive: bool,
+    /// Indices into `entries` matching the query (local mode), or flat paths (recursive).
+    pub search_results: Vec<usize>,
+    pub search_result_paths: Vec<PathBuf>,
+    pub search_cursor: usize,
 }
 
 impl FileBrowserState {
@@ -45,6 +54,12 @@ impl FileBrowserState {
             scroll_offset: 0,
             visible: false,
             width: 30,
+            search_mode: false,
+            search_query: String::new(),
+            search_recursive: false,
+            search_results: Vec::new(),
+            search_result_paths: Vec::new(),
+            search_cursor: 0,
         };
         state.refresh_root();
         state
@@ -239,6 +254,152 @@ impl FileBrowserState {
         self.visible = !self.visible;
     }
 
+    // ── Search ──────────────────────────────────────────────────────────────
+
+    /// Enter search mode.
+    pub fn enter_search(&mut self) {
+        self.search_mode = true;
+        self.search_query.clear();
+        self.search_results.clear();
+        self.search_result_paths.clear();
+        self.search_cursor = 0;
+    }
+
+    /// Exit search mode without applying.
+    pub fn exit_search(&mut self) {
+        self.search_mode = false;
+        self.search_query.clear();
+        self.search_results.clear();
+        self.search_result_paths.clear();
+    }
+
+    /// Type a character into the search query and re-filter.
+    pub fn search_push(&mut self, c: char) {
+        self.search_query.push(c);
+        self.search_cursor = 0;
+        self.run_search();
+    }
+
+    /// Delete last character from query.
+    pub fn search_pop(&mut self) {
+        self.search_query.pop();
+        self.search_cursor = 0;
+        self.run_search();
+    }
+
+    /// Move to next search result.
+    pub fn search_next(&mut self) {
+        if self.search_results.is_empty() && self.search_result_paths.is_empty() {
+            return;
+        }
+        let len = if self.search_recursive {
+            self.search_result_paths.len()
+        } else {
+            self.search_results.len()
+        };
+        if len > 0 {
+            self.search_cursor = (self.search_cursor + 1) % len;
+            if !self.search_recursive {
+                self.cursor = self.search_results[self.search_cursor];
+            }
+        }
+    }
+
+    /// Move to previous search result.
+    pub fn search_prev(&mut self) {
+        if self.search_results.is_empty() && self.search_result_paths.is_empty() {
+            return;
+        }
+        let len = if self.search_recursive {
+            self.search_result_paths.len()
+        } else {
+            self.search_results.len()
+        };
+        if len > 0 {
+            self.search_cursor = if self.search_cursor == 0 {
+                len - 1
+            } else {
+                self.search_cursor - 1
+            };
+            if !self.search_recursive {
+                self.cursor = self.search_results[self.search_cursor];
+            }
+        }
+    }
+
+    /// Toggle between local and recursive search.
+    pub fn search_toggle_recursive(&mut self) {
+        self.search_recursive = !self.search_recursive;
+        self.search_cursor = 0;
+        self.run_search();
+    }
+
+    /// Accept current search selection — returns selected path if any.
+    pub fn search_accept(&mut self) -> Option<PathBuf> {
+        let path = if self.search_recursive {
+            self.search_result_paths.get(self.search_cursor).cloned()
+        } else {
+            self.search_results
+                .get(self.search_cursor)
+                .and_then(|&i| self.entries.get(i))
+                .map(|e| e.path.clone())
+        };
+        // Jump cursor to selected entry in local mode
+        if !self.search_recursive {
+            if let Some(&idx) = self.search_results.get(self.search_cursor) {
+                self.cursor = idx;
+            }
+        }
+        self.exit_search();
+        path
+    }
+
+    fn run_search(&mut self) {
+        self.search_results.clear();
+        self.search_result_paths.clear();
+        if self.search_query.is_empty() {
+            return;
+        }
+        let q = self.search_query.to_lowercase();
+        if self.search_recursive {
+            collect_recursive_matches(&self.root, &q, &mut self.search_result_paths);
+        } else {
+            for (i, entry) in self.entries.iter().enumerate() {
+                if entry.name.to_lowercase().contains(&q) {
+                    self.search_results.push(i);
+                }
+            }
+            // Jump cursor to first match
+            if let Some(&first) = self.search_results.first() {
+                self.cursor = first;
+            }
+        }
+    }
+}
+
+/// Walk the directory tree and collect paths whose name matches `query`.
+fn collect_recursive_matches(dir: &Path, query: &str, results: &mut Vec<PathBuf>) {
+    if results.len() >= 200 {
+        return; // Limit to avoid freezing on huge trees
+    }
+    if let Ok(iter) = std::fs::read_dir(dir) {
+        let mut entries: Vec<_> = iter.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let path = e.path();
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if name.contains(query) {
+                results.push(path.clone());
+            }
+            if path.is_dir() {
+                collect_recursive_matches(&path, query, results);
+            }
+        }
+    }
+}
+
+/// Adjust scroll offset for visible height (free function, used by impl and widget).
+impl FileBrowserState {
     /// Adjust scroll offset for visible height.
     pub fn adjust_scroll(&mut self, visible_height: usize) {
         if self.cursor >= self.scroll_offset + visible_height {
@@ -325,6 +486,10 @@ impl<'a> Widget for FileBrowserWidget<'a> {
         let cursor_bg = Color::Rgb(69, 71, 90);   // Catppuccin surface1
         let dim = Color::Rgb(88, 91, 112);        // Catppuccin overlay0
         let green = Color::Rgb(166, 227, 161);    // Catppuccin green
+        let yellow = Color::Rgb(249, 226, 175);   // Catppuccin yellow (search match)
+        let red = Color::Rgb(243, 139, 168);      // Catppuccin red
+        // Search bar occupies the last row when search is active
+        let search_row_reserved: u16 = if self.state.search_mode { 1 } else { 0 };
 
         // Fill background
         let bg_style = Style::default().bg(bg);
@@ -349,7 +514,7 @@ impl<'a> Widget for FileBrowserWidget<'a> {
         }
 
         let inner_w = area.width.saturating_sub(1) as usize; // exclude right border
-        let content_area_h = area.height.saturating_sub(2) as usize; // header + path
+        let content_area_h = area.height.saturating_sub(2 + search_row_reserved) as usize; // header + path + optional search bar
 
         // Header
         let header_style = Style::default()
@@ -378,6 +543,13 @@ impl<'a> Widget for FileBrowserWidget<'a> {
         let start_y = area.y + 2;
         let visible_entries = &self.state.entries
             [self.state.scroll_offset..self.state.entries.len().min(self.state.scroll_offset + content_area_h)];
+
+        // Collect search result index set for O(1) highlight lookup
+        let search_match_set: std::collections::HashSet<usize> = if self.state.search_mode && !self.state.search_query.is_empty() {
+            self.state.search_results.iter().copied().collect()
+        } else {
+            std::collections::HashSet::new()
+        };
 
         for (i, entry) in visible_entries.iter().enumerate() {
             let abs_idx = self.state.scroll_offset + i;
@@ -411,8 +583,17 @@ impl<'a> Widget for FileBrowserWidget<'a> {
             };
 
             // Name style
+            let is_search_match = search_match_set.contains(&abs_idx);
+            let is_search_selected = self.state.search_mode
+                && !self.state.search_recursive
+                && self.state.search_results.get(self.state.search_cursor) == Some(&abs_idx);
+
             let name_style = if entry.name == ".." {
                 Style::default().fg(dim).bg(row_bg)
+            } else if is_search_selected {
+                Style::default().fg(bg).bg(yellow).add_modifier(Modifier::BOLD)
+            } else if is_search_match {
+                Style::default().fg(yellow).bg(row_bg).add_modifier(Modifier::BOLD)
             } else if entry.is_dir {
                 Style::default()
                     .fg(dir_color)
@@ -470,6 +651,53 @@ impl<'a> Widget for FileBrowserWidget<'a> {
             if sb_y < area.y + area.height {
                 let sb_style = Style::default().fg(dim).bg(bg);
                 buf.set_string(right_x, sb_y, "\u{2588}", sb_style); // █ scrollbar thumb
+            }
+        }
+
+        // ── Search bar (bottom row when search_mode = true) ────────────────
+        if self.state.search_mode {
+            let sb_y = area.y + area.height.saturating_sub(1);
+            let mode_label = if self.state.search_recursive {
+                " \u{f002}rec "
+            } else {
+                " \u{f002} "
+            };
+            let label_style = Style::default()
+                .fg(bg)
+                .bg(if self.state.search_recursive { red } else { green })
+                .add_modifier(Modifier::BOLD);
+            buf.set_string(area.x, sb_y, mode_label, label_style);
+            let qx = area.x + mode_label.chars().count() as u16;
+            let query_with_cursor = format!("{}\u{258a}", self.state.search_query);
+            let avail = (area.width.saturating_sub(qx - area.x + 1)) as usize;
+            let display_q = if query_with_cursor.len() > avail {
+                &query_with_cursor[query_with_cursor.len() - avail..]
+            } else {
+                &query_with_cursor
+            };
+            let q_str = format!("{:<width$}", display_q, width = avail);
+            let q_style = Style::default().fg(text_color).bg(cursor_bg);
+            buf.set_string(qx, sb_y, &q_str, q_style);
+
+            // Result count badge
+            let result_count = if self.state.search_recursive {
+                self.state.search_result_paths.len()
+            } else {
+                self.state.search_results.len()
+            };
+            if result_count > 0 {
+                let count_str = format!(
+                    "{}/{} Tab=rec",
+                    self.state.search_cursor + 1,
+                    result_count
+                );
+                let count_x = (area.x + area.width)
+                    .saturating_sub(count_str.len() as u16 + 1);
+                let count_style = Style::default()
+                    .fg(yellow)
+                    .bg(cursor_bg)
+                    .add_modifier(Modifier::BOLD);
+                buf.set_string(count_x, sb_y, &count_str, count_style);
             }
         }
     }

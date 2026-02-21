@@ -140,6 +140,10 @@ uterx/
 - [ ] Search overlay widget
 - [x] **Mouse event handling** — mouse capture enabled, click-to-focus pane, scroll stubs
 - [x] **Overlay system** — Help and CommandPalette overlays render on top of terminal, intercept input
+- [x] **File browser sidebar** (Ctrl+E) — tree-view with expand/collapse, file icons, cursor nav, scroll, Catppuccin theme
+- [x] **Focus system** — Terminal ↔ FileBrowser ↔ Editor(u64) focus, sidebar layout with horizontal split
+- [x] **File browser search** — `/` enters search mode; local (fuzzy match in current entries) and recursive (walk subtree, max 200 results); Tab toggles local/recursive; Up/Down navigate results; Enter opens or jumps; yellow match highlighting in tree
+- [x] **Floating editor pane** — `syntect`-based syntax highlighting (base16-ocean.dark), modal editing (Normal/Insert vim-style), undo stack, Ctrl+S save, Ctrl+W close guard; drag title bar to move; opens files from file browser; pink/blue border accent; renders on top of tiled + floating panes
 
 #### 1.5 uterx-app: Main Binary (DONE)
 - [x] CLI with `clap` — plugin subcommands (add, remove, list, update)
@@ -169,6 +173,8 @@ uterx/
 - [x] **Keybindings** — Alt+H split-h, Alt+V split-v, Alt+Left/Right focus, Alt+B broadcast, Ctrl+T tab, Ctrl+W close
 - [x] **Session persistence** — save to TOML on exit (`~/.uterx/sessions/`), restore with PTY re-spawning
 - [x] **Mouse support** — click-to-focus pane, mouse capture on/off, scroll stubs
+- [x] **File browser → pane** — Right-arrow on folder opens new tab cd'd into that directory, folder name as pane title
+- [x] **Sidebar-aware layout** — Pane area computed with sidebar offset, resize events account for sidebar width
 - [ ] Session auto-restore on launch (CLI flag) ← Sprint 4
 - [ ] Mouse-based pane border drag resizing ← Sprint 4
 - [ ] Drag-and-drop pane reordering ← later
@@ -209,7 +215,7 @@ uterx/
 - [ ] Bluetooth Messaging
 - [ ] Mesh & WLAN Messaging
 - [ ] Midnight Blockchain Integration
-- [ ] Text/Code Editor
+- [x] Text/Code Editor — built-in floating editor pane (syntect, modal vim, undo); advanced plugin version (helix + tree-sitter) deferred
 - [ ] File Sharing
 - [ ] Network Tools
 - [ ] SSH Tools
@@ -325,7 +331,7 @@ Build plugins in priority order:
 1. Converter (simplest, good test of plugin API)
 2. Network Tools (pnet-based, visual graphs)
 3. SSH Tools (russh async sessions)
-4. Text/Code Editor (helix + tree-sitter)
+4. ~~Text/Code Editor~~ — **DONE** as built-in (syntect + modal vim); advanced plugin (helix + tree-sitter) may follow
 5. File Sharing (iroh + libp2p)
 6. Bluetooth Messaging (btleplug)
 7. Mesh & WLAN Messaging (libp2p + iroh)
@@ -345,3 +351,5 @@ Build plugins in priority order:
 | 2026-02-21 | Phase 2 | **Sprint 3 complete**              | Session persistence (save TOML on exit, load+restore with PTY respawn). Config auto-creation on first launch. Mouse capture + click-to-focus pane. 21 total tests (13 core + 8 mux). |
 | 2026-02-22 | Phase 2 | **UI Overhaul complete**            | Catppuccin theme. Redesigned TabBar (branding, indexed tabs, [+]/[?] buttons, broadcast indicator). Redesigned StatusBar (session badge, pane count, keybinding hints). New HelpOverlay (F1, replaces old tutorial — sections: General, Tabs, Panes, Broadcast, Config). New CommandPalette (Ctrl+P, fuzzy filter, keyboard nav, executes actions). Overlay system (Help/CommandPalette render on top, intercept input). Pane borders themed (blue=focused, dim=unfocused). First-launch shows help overlay automatically. 21 tests passing. |
 | 2026-02-22 | Phase 2 | **File Browser & Desktop Features** | File browser sidebar (Ctrl+E toggle). Tree-view with expand/collapse, file icons (Nerd Font), cursor navigation, scroll, Catppuccin theme. Focus system (Terminal ↔ FileBrowser). Sidebar layout (horizontal split). Folder→pane: Right arrow on folder opens new tab cd'd into directory. Mouse click in sidebar focuses file browser. Command palette + help overlay updated with File Browser entries. Event loop fully rewritten with Focus enum, sidebar-aware pane area, file browser input handling. 21 tests passing. |
+| 2026-02-23 | Phase 2 | **Mouse Tab Navigation & Floating Panes** | Mouse-driven tab bar: click tab label to switch, [+] to create tab, [?] to open help. Floating panes (Alt+F): toggle focused pane to free-floating, centered at 60% of terminal area. Drag title bar to move floating pane. Floating panes render on top of tiled panes with drop shadow (Catppuccin crust) and pink accent border (focused) / blue (unfocused). `DragState` tracks drag offset for smooth movement. `Pane::is_floating`, `Tab::toggle_float()`, `Tab::move_floating_pane()`, `Tab::tiled_panes()`, `Tab::floating_panes()` added. Command palette + help overlay updated. 21 tests passing. |
+| 2026-02-21 | Phase 2 | **File Browser Search + Floating Editor** | File browser search (`/`): local fuzzy filter in current entries + recursive tree walk (Tab toggles, max 200 results). Yellow match highlighting, Up/Down result navigation, Enter to open/jump. Floating editor pane: `syntect` syntax highlighting (base16-ocean.dark), modal vim editing (Normal/Insert), undo stack, Ctrl+S save, Ctrl+W close guard (2-press). Opens text/code files from browser or search results; drag title bar to reposition. New types: `Focus::Editor(u64)`, `EditorPane`, `EditorDragState`, `EditorState`, `EditorWidget`. Help overlay expanded (File Browser, Editor Normal, Editor Insert). Command palette: "Search Files" entry. `syntect = "5"` added to uterx-ui. 21 tests passing. |

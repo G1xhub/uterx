@@ -34,6 +34,7 @@ use std::io;
 use uterx_mux::{Rect as MuxRect, Session};
 use uterx_ui::input::{Action, InputHandler};
 use uterx_ui::widgets::command_palette::{default_commands, CommandEntry, CommandPalette};
+use uterx_ui::widgets::editor::{EditorState, EditorWidget, EditorMode};
 use uterx_ui::widgets::file_browser::{FileBrowserState, FileBrowserWidget};
 use uterx_ui::widgets::help_overlay::HelpOverlay;
 use uterx_ui::widgets::status_bar::StatusBar;
@@ -53,6 +54,29 @@ enum Overlay {
 enum Focus {
     Terminal,
     FileBrowser,
+    Editor(u64),
+}
+
+/// A floating editor pane for viewing/editing files.
+struct EditorPane {
+    id: u64,
+    state: EditorState,
+    /// Position/size in screen coordinates (includes chrome offset already).
+    rect: ratatui::layout::Rect,
+}
+
+/// State for mouse-dragging a floating pane.
+struct DragState {
+    pane_id: uterx_mux::PaneId,
+    /// Mouse offset from the pane's top-left corner.
+    offset_x: u16,
+    offset_y: u16,
+}
+
+/// State for mouse-dragging an editor pane.
+struct EditorDragState {
+    editor_id: u64,
+    offset_x: u16,
 }
 
 /// Run the main terminal event loop.
@@ -115,6 +139,14 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
 
     // Focus state
     let mut focus = Focus::Terminal;
+
+    // Floating pane drag state
+    let mut dragging: Option<DragState> = None;
+
+    // Editor panes
+    let mut editor_panes: Vec<EditorPane> = Vec::new();
+    let mut next_editor_id: u64 = 1;
+    let mut editor_dragging: Option<EditorDragState> = None;
 
     // crossterm event stream
     let mut event_stream = EventStream::new();
@@ -214,21 +246,26 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
 
             // ── Terminal panes ──
             if let Some(tab) = session.active_tab() {
-                if tab.panes.len() == 1 {
-                    if let Some(pane) = tab.panes.first() {
+                // Count only tiled panes for layout
+                let tiled_count = tab.panes.iter().filter(|p| !p.is_floating).count();
+
+                if tiled_count == 1 && tab.floating_panes().count() == 0 {
+                    // Single tiled pane — fill the area
+                    if let Some(pane) = tab.tiled_panes().next() {
                         let view = TerminalView::new(&pane.grid);
                         frame.render_widget(view, term_area);
                     }
                 } else {
+                    // Multiple tiled panes — compute layout rects with styled borders
                     let mux_area = MuxRect {
                         x: term_area.x,
                         y: term_area.y,
                         width: term_area.width,
                         height: term_area.height,
                     };
-                    let rects = tab.layout.compute_rects(mux_area, tab.panes.len());
+                    let rects = tab.layout.compute_rects(mux_area, tiled_count);
 
-                    for (pane, mux_rect) in tab.panes.iter().zip(rects.iter()) {
+                    for (pane, mux_rect) in tab.tiled_panes().zip(rects.iter()) {
                         let pane_area = ratatui::layout::Rect {
                             x: mux_rect.x,
                             y: mux_rect.y,
@@ -273,6 +310,137 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                         frame.render_widget(view, inner);
                     }
                 }
+
+                // ── Floating panes (rendered on TOP of tiled panes) ──
+                // Collect floating pane info first to avoid borrow issues
+                let floating_info: Vec<_> = tab.floating_panes().map(|pane| {
+                    let chrome_y = if show_tab_bar { 1u16 } else { 0 };
+                    let sidebar_x = if fb_visible { fb_width } else { 0 };
+                    let float_area = ratatui::layout::Rect {
+                        x: pane.rect.x.saturating_add(sidebar_x),
+                        y: pane.rect.y.saturating_add(chrome_y),
+                        width: pane.rect.width.min(area.width.saturating_sub(pane.rect.x + sidebar_x)),
+                        height: pane.rect.height.min(area.height.saturating_sub(pane.rect.y + chrome_y)),
+                    };
+                    (float_area, pane.focused, pane.grid.title.clone())
+                }).collect();
+
+                // Draw shadows
+                {
+                    let buf = frame.buffer_mut();
+                    let shadow_style = Style::default().bg(Color::Rgb(17, 17, 27));
+                    for (float_area, _, _) in &floating_info {
+                        if float_area.width < 4 || float_area.height < 3 {
+                            continue;
+                        }
+                        // Right shadow
+                        for sy in (float_area.y + 1)..=(float_area.y + float_area.height) {
+                            if sy < area.y + area.height {
+                                let sx = float_area.x + float_area.width;
+                                if sx < area.x + area.width {
+                                    if let Some(cell) = buf.cell_mut((sx, sy)) {
+                                        cell.set_char(' ');
+                                        cell.set_style(shadow_style);
+                                    }
+                                }
+                            }
+                        }
+                        // Bottom shadow
+                        if float_area.y + float_area.height < area.y + area.height {
+                            let sy = float_area.y + float_area.height;
+                            for sx in (float_area.x + 1)..=(float_area.x + float_area.width) {
+                                if sx < area.x + area.width {
+                                    if let Some(cell) = buf.cell_mut((sx, sy)) {
+                                        cell.set_char(' ');
+                                        cell.set_style(shadow_style);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Render floating pane widgets
+                let mut float_pane_idx = 0;
+                for pane in tab.floating_panes() {
+                    if float_pane_idx >= floating_info.len() { break; }
+                    let (float_area, focused, _) = &floating_info[float_pane_idx];
+                    float_pane_idx += 1;
+
+                    if float_area.width < 4 || float_area.height < 3 {
+                        continue;
+                    }
+
+                    let (border_style, title_style) = if *focused {
+                        (
+                            Style::default()
+                                .fg(Color::Rgb(245, 194, 231)) // Catppuccin pink (floating accent)
+                                .add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::Rgb(205, 214, 244))
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        (
+                            Style::default().fg(Color::Rgb(137, 180, 250)),
+                            Style::default().fg(Color::Rgb(108, 112, 134)),
+                        )
+                    };
+
+                    let pane_title = if pane.grid.title.is_empty() {
+                        "\u{f0a8} float".to_string() // floating icon
+                    } else {
+                        format!("\u{f0a8} {}", pane.grid.title)
+                    };
+
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(border_style)
+                        .title(Span::styled(
+                            format!(" {} ", pane_title),
+                            title_style,
+                        ));
+                    let inner = block.inner(*float_area);
+                    frame.render_widget(block, *float_area);
+
+                    let view = TerminalView::new(&pane.grid)
+                        .show_cursor(pane.focused);
+                    frame.render_widget(view, inner);
+                }
+            }
+
+            // ── Editor panes (on top of terminal panes, below overlays) ──
+            for ep in &editor_panes {
+                if ep.rect.width < 10 || ep.rect.height < 4 {
+                    continue;
+                }
+                let is_focused = focus == Focus::Editor(ep.id);
+                let border_color = if is_focused {
+                    Color::Rgb(245, 194, 231) // pink
+                } else {
+                    Color::Rgb(137, 180, 250) // blue
+                };
+                let title_style = Style::default()
+                    .fg(Color::Rgb(205, 214, 244))
+                    .add_modifier(Modifier::BOLD);
+                let border_style = Style::default()
+                    .fg(border_color)
+                    .add_modifier(Modifier::BOLD);
+                let fname = ep.state.path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "[no name]".to_string());
+                let mod_flag = if ep.state.modified { " [+]" } else { "" };
+                let block = ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::ALL)
+                    .border_style(border_style)
+                    .title(ratatui::text::Span::styled(
+                        format!(" \u{f0f6} {}{} ", fname, mod_flag),
+                        title_style,
+                    ));
+                let inner = block.inner(ep.rect);
+                frame.render_widget(block, ep.rect);
+                let editor_widget = EditorWidget::new(&ep.state);
+                frame.render_widget(editor_widget, inner);
             }
 
             // ── Status bar ──
@@ -434,6 +602,50 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
 
                         // ── File browser focused input ──
                         if focus == Focus::FileBrowser && file_browser.visible {
+                            // If search mode is active, intercept most keys for search
+                            if file_browser.search_mode {
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        file_browser.exit_search();
+                                    }
+                                    KeyCode::Tab => {
+                                        file_browser.search_toggle_recursive();
+                                    }
+                                    KeyCode::Up => {
+                                        file_browser.search_prev();
+                                        let h = terminal.size().map(|s| s.height.saturating_sub(4) as usize).unwrap_or(20);
+                                        file_browser.adjust_scroll(h);
+                                    }
+                                    KeyCode::Down => {
+                                        file_browser.search_next();
+                                        let h = terminal.size().map(|s| s.height.saturating_sub(4) as usize).unwrap_or(20);
+                                        file_browser.adjust_scroll(h);
+                                    }
+                                    KeyCode::Enter => {
+                                        let path = file_browser.search_accept();
+                                        if let Some(p) = path {
+                                            if p.is_dir() {
+                                                // Navigate to selected directory
+                                                file_browser.navigate_to(p);
+                                            } else {
+                                                // Open file in editor
+                                                let screen_area = compute_screen_area(&terminal, show_tab_bar, show_status_bar,
+                                                    if file_browser.visible { file_browser.width } else { 0 });
+                                                open_file_in_editor(&p, screen_area, &mut editor_panes, &mut next_editor_id, &mut focus);
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Backspace => {
+                                        file_browser.search_pop();
+                                    }
+                                    KeyCode::Char(c) => {
+                                        file_browser.search_push(c);
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
                             match key.code {
                                 KeyCode::Up => {
                                     file_browser.cursor_up();
@@ -449,15 +661,16 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                             let path = entry.path.clone();
                                             let entry_name = entry.name.clone();
                                             if entry_name == ".." {
-                                                // Navigate up
                                                 file_browser.navigate_to(path);
-                                            } else if entry.expanded {
-                                                // Collapse
-                                                file_browser.toggle_expand();
                                             } else {
-                                                // Expand directory in tree
                                                 file_browser.toggle_expand();
                                             }
+                                        } else {
+                                            // ── Open file in editor ──
+                                            let path = entry.path.clone();
+                                            let screen_area = compute_screen_area(&terminal, show_tab_bar, show_status_bar,
+                                                if file_browser.visible { file_browser.width } else { 0 });
+                                            open_file_in_editor(&path, screen_area, &mut editor_panes, &mut next_editor_id, &mut focus);
                                         }
                                     }
                                 }
@@ -494,10 +707,93 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     focus = Focus::Terminal;
                                 }
                                 KeyCode::Char('r') => {
-                                    // Refresh
                                     file_browser.refresh_root();
                                 }
+                                KeyCode::Char('/') => {
+                                    file_browser.enter_search();
+                                }
                                 _ => {}
+                            }
+                            continue;
+                        }
+
+                        // ── Editor focused input ──
+                        if let Focus::Editor(eid) = focus.clone() {
+                            if let Some(ep) = editor_panes.iter_mut().find(|e| e.id == eid) {
+                                let state = &mut ep.state;
+                                let visible_h = ep.rect.height.saturating_sub(3) as usize;
+
+                                // Handle close request
+                                if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    if state.modified && !state.close_requested {
+                                        state.close_requested = true;
+                                    } else {
+                                        state.should_close = true;
+                                    }
+                                    continue;
+                                }
+                                // Save
+                                if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                                    let _ = state.save();
+                                    continue;
+                                }
+
+                                match state.mode {
+                                    EditorMode::Normal => match key.code {
+                                        KeyCode::Char('i') => { state.mode = EditorMode::Insert; state.close_requested = false; }
+                                        KeyCode::Char('a') => {
+                                            state.mode = EditorMode::Insert;
+                                            let row = state.cursor_row;
+                                            let len = state.lines[row].len();
+                                            if state.cursor_col < len { state.cursor_col += 1; }
+                                        }
+                                        KeyCode::Char('o') => {
+                                            let row = state.cursor_row;
+                                            let len = state.lines[row].len();
+                                            state.cursor_col = len;
+                                            state.insert_newline();
+                                            state.mode = EditorMode::Insert;
+                                        }
+                                        KeyCode::Char('h') | KeyCode::Left  => state.move_cursor(0, -1),
+                                        KeyCode::Char('j') | KeyCode::Down  => { state.move_cursor(1, 0); state.adjust_scroll_to_cursor(visible_h); }
+                                        KeyCode::Char('k') | KeyCode::Up    => { state.move_cursor(-1, 0); state.adjust_scroll_to_cursor(visible_h); }
+                                        KeyCode::Char('l') | KeyCode::Right => state.move_cursor(0, 1),
+                                        KeyCode::Char('0') => state.move_to_line_start(),
+                                        KeyCode::Char('$') => state.move_to_line_end(),
+                                        KeyCode::Char('x') => state.delete_char_at(),
+                                        KeyCode::Char('u') => state.undo(),
+                                        KeyCode::Char('G') => { state.move_to_last_line(); state.adjust_scroll_to_cursor(visible_h); }
+                                        KeyCode::Char('g') => { state.move_to_first_line(); }
+                                        KeyCode::Char('d') => state.delete_line(),
+                                        KeyCode::Esc => { state.close_requested = false; }
+                                        _ => {}
+                                    },
+                                    EditorMode::Insert => match key.code {
+                                        KeyCode::Esc => { state.mode = EditorMode::Normal; }
+                                        KeyCode::Enter => state.insert_newline(),
+                                        KeyCode::Backspace => state.delete_char_before(),
+                                        KeyCode::Delete => state.delete_char_at(),
+                                        KeyCode::Up    => { state.move_cursor(-1, 0); state.adjust_scroll_to_cursor(visible_h); }
+                                        KeyCode::Down  => { state.move_cursor(1, 0); state.adjust_scroll_to_cursor(visible_h); }
+                                        KeyCode::Left  => state.move_cursor(0, -1),
+                                        KeyCode::Right => state.move_cursor(0, 1),
+                                        KeyCode::Home  => state.move_to_line_start(),
+                                        KeyCode::End   => state.move_to_line_end(),
+                                        KeyCode::Char(c) => {
+                                            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                                                state.insert_char(c);
+                                                state.adjust_scroll_to_cursor(visible_h);
+                                            }
+                                        }
+                                        _ => {}
+                                    },
+                                }
+                            }
+                            // Remove closed editors
+                            editor_panes.retain(|ep| !ep.state.should_close);
+                            // If the focused editor was just closed, return focus to terminal
+                            if !editor_panes.iter().any(|ep| ep.id == eid) {
+                                focus = Focus::Terminal;
                             }
                             continue;
                         }
@@ -588,6 +884,15 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                         tab.toggle_broadcast();
                                     }
                                 }
+                                Action::ToggleFloat => {
+                                    let area = compute_pane_area(
+                                        &terminal, show_tab_bar, show_status_bar,
+                                        if file_browser.visible { file_browser.width } else { 0 },
+                                    );
+                                    if let Some(tab) = session.active_tab_mut() {
+                                        tab.toggle_float(area);
+                                    }
+                                }
                                 Action::Search | Action::Fullscreen => {
                                     tracing::debug!("action {:?} not yet implemented", action);
                                 }
@@ -624,12 +929,90 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                     }
                     Event::Mouse(mouse) => {
                         if overlay == Overlay::None {
-                            // Check if click is in file browser area
-                            if file_browser.visible && mouse.column < file_browser.width {
+                            let sidebar_w = if file_browser.visible { file_browser.width } else { 0 };
+                            let chrome_y = if show_tab_bar { 1u16 } else { 0 };
+
+                            // ── Handle active drag of a floating pane ──
+                            match mouse.kind {
+                                MouseEventKind::Drag(MouseButton::Left) => {
+                                    // Editor pane drag takes priority
+                                    if let Some(ref ed) = editor_dragging {
+                                        let eid = ed.editor_id;
+                                        let ox = ed.offset_x;
+                                        if let Some(ep) = editor_panes.iter_mut().find(|e| e.id == eid) {
+                                            ep.rect.x = mouse.column.saturating_sub(ox);
+                                            ep.rect.y = mouse.row;
+                                        }
+                                        continue;
+                                    }
+                                    if let Some(ref drag) = dragging {
+                                        let drag_id = drag.pane_id;
+                                        let drag_ox = drag.offset_x;
+                                        let drag_oy = drag.offset_y;
+                                        // New position in pane-local coordinates (subtract chrome/sidebar)
+                                        let new_x = mouse.column
+                                            .saturating_sub(sidebar_w)
+                                            .saturating_sub(drag_ox);
+                                        let new_y = mouse.row
+                                            .saturating_sub(chrome_y)
+                                            .saturating_sub(drag_oy);
+                                        if let Some(tab) = session.active_tab_mut() {
+                                            tab.move_floating_pane(drag_id, new_x, new_y);
+                                        }
+                                        continue;
+                                    }
+                                }
+                                MouseEventKind::Up(MouseButton::Left) => {
+                                    dragging = None;
+                                    editor_dragging = None;
+                                    continue;
+                                }
+                                _ => {}
+                            }
+
+                            // ── Tab bar click (row 0 when tab bar visible) ──
+                            if show_tab_bar && mouse.row == 0 {
+                                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                                    // Compute tab hit zones (same layout as TabBar widget)
+                                    // Brand: " uterx " (7) + separator (1) = offset 8
+                                    let brand_width: u16 = 8; // " uterx │"
+                                    let right_section_width: u16 = 12;
+                                    let term_width = terminal.size().map(|s| s.width).unwrap_or(80);
+                                    let plus_x = term_width.saturating_sub(right_section_width);
+                                    let help_x = plus_x + 5;
+
+                                    // [+] button: columns plus_x..plus_x+5
+                                    if mouse.column >= plus_x && mouse.column < plus_x + 5 {
+                                        let area = compute_pane_area(&terminal, show_tab_bar, show_status_bar, sidebar_w);
+                                        let _ = session.create_tab(&shell, area);
+                                    // [?] button: columns help_x..help_x+5
+                                    } else if mouse.column >= help_x && mouse.column < help_x + 5 {
+                                        overlay = Overlay::Help;
+                                    } else if mouse.column >= brand_width {
+                                        // Tab click — compute which tab
+                                        let mut x = brand_width;
+                                        let max_tab_x = term_width.saturating_sub(right_section_width);
+                                        for (i, t) in session.tabs.iter().enumerate() {
+                                            let label = format!(" {}:{} ", i + 1, t.name);
+                                            let tab_w = label.len() as u16;
+                                            if x + tab_w > max_tab_x { break; }
+                                            if mouse.column >= x && mouse.column < x + tab_w {
+                                                // Clicked on this tab
+                                                session.active_tab = Some(t.id);
+                                                break;
+                                            }
+                                            x += tab_w + 1; // +1 for separator
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+
+                            // ── File browser area ──
+                            if file_browser.visible && mouse.column < sidebar_w {
                                 if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
                                     focus = Focus::FileBrowser;
-                                    // Click on a specific entry
-                                    let header_offset = if show_tab_bar { 1u16 } else { 0 } + 2; // tab bar + header + path
+                                    let header_offset = chrome_y + 2;
                                     if mouse.row >= header_offset {
                                         let clicked_idx = file_browser.scroll_offset
                                             + (mouse.row - header_offset) as usize;
@@ -638,16 +1021,94 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                         }
                                     }
                                 }
-                            } else {
-                                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                                    focus = Focus::Terminal;
+                                continue;
+                            }
+
+                            // ── Terminal area ──
+                            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                                focus = Focus::Terminal;
+                            }
+
+                            // Check if clicking on an editor pane
+                            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                                let mut hit_editor = false;
+                                for ep in editor_panes.iter().rev() {
+                                    let r = ep.rect;
+                                    if mouse.column >= r.x && mouse.column < r.x + r.width
+                                        && mouse.row >= r.y && mouse.row < r.y + r.height
+                                    {
+                                        focus = Focus::Editor(ep.id);
+                                        hit_editor = true;
+                                        // Title bar drag
+                                        if mouse.row == r.y {
+                                            editor_dragging = Some(EditorDragState {
+                                                editor_id: ep.id,
+                                                offset_x: mouse.column.saturating_sub(r.x),
+                                            });
+                                        }
+                                        break;
+                                    }
                                 }
-                                handle_mouse_event(
-                                    &mut session,
-                                    mouse,
-                                    show_tab_bar,
-                                    if file_browser.visible { file_browser.width } else { 0 },
-                                );
+                                if hit_editor {
+                                    continue;
+                                }
+                            }
+
+                            // Check if clicking on a floating pane title bar to start drag
+                            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                                let adj_col = mouse.column.saturating_sub(sidebar_w);
+                                let adj_row = mouse.row.saturating_sub(chrome_y);
+                                if let Some(tab) = session.active_tab_mut() {
+                                    let mut drag_started = false;
+                                    // Iterate floating panes in reverse (topmost first visually)
+                                    for pane in tab.panes.iter_mut().rev() {
+                                        if !pane.is_floating { continue; }
+                                        let r = &pane.rect;
+                                        // Check if click is on the title bar (y == r.y, within width)
+                                        if adj_row == r.y
+                                            && adj_col >= r.x
+                                            && adj_col < r.x + r.width
+                                        {
+                                            // Focus this pane
+                                            let pid = pane.id;
+                                            pane.focused = true;
+                                            let offset_x = adj_col - r.x;
+                                            dragging = Some(DragState {
+                                                pane_id: pid,
+                                                offset_x,
+                                                offset_y: 0,
+                                            });
+                                            drag_started = true;
+                                            break;
+                                        }
+                                        // Click anywhere inside floating pane → focus
+                                        if adj_row >= r.y
+                                            && adj_row < r.y + r.height
+                                            && adj_col >= r.x
+                                            && adj_col < r.x + r.width
+                                        {
+                                            let pid = pane.id;
+                                            pane.focused = true;
+                                            tab.active_pane = Some(pid);
+                                            drag_started = true;
+                                            break;
+                                        }
+                                    }
+                                    if drag_started {
+                                        // Unfocus all other panes
+                                        if let Some(ref drag) = dragging {
+                                            let did = drag.pane_id;
+                                            for p in &mut tab.panes {
+                                                if p.id != did { p.focused = false; }
+                                            }
+                                        }
+                                    } else {
+                                        // No floating pane hit — delegate to tiled pane handling
+                                        handle_mouse_event(&mut session, mouse, show_tab_bar, sidebar_w);
+                                    }
+                                }
+                            } else {
+                                handle_mouse_event(&mut session, mouse, show_tab_bar, sidebar_w);
                             }
                         }
                     }
@@ -688,6 +1149,7 @@ enum PaletteAction {
     PrevPane,
     Broadcast,
     FileBrowser,
+    ToggleFloat,
 }
 
 /// Map a command palette entry to a PaletteAction.
@@ -704,6 +1166,7 @@ fn palette_action_for(cmd: &CommandEntry) -> Option<PaletteAction> {
         "Toggle Broadcast" => Some(PaletteAction::Broadcast),
         "Help" => Some(PaletteAction::Help),
         "File Browser" => Some(PaletteAction::FileBrowser),
+        "Toggle Floating" => Some(PaletteAction::ToggleFloat),
         "Quit" => Some(PaletteAction::Quit),
         _ => None,
     }
@@ -771,6 +1234,10 @@ fn execute_palette_action(
         PaletteAction::Broadcast => {
             if let Some(tab) = session.active_tab_mut() { tab.toggle_broadcast(); }
         }
+        PaletteAction::ToggleFloat => {
+            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, sidebar_w);
+            if let Some(tab) = session.active_tab_mut() { tab.toggle_float(area); }
+        }
     }
     false
 }
@@ -789,6 +1256,35 @@ fn filter_commands(all: &[CommandEntry], filter: &str) -> Vec<CommandEntry> {
         })
         .cloned()
         .collect()
+}
+
+/// Open a file in a floating editor pane.
+/// `screen_area` is in ratatui screen coordinates (accounts for tab bar and sidebar).
+fn open_file_in_editor(
+    path: &std::path::Path,
+    screen_area: ratatui::layout::Rect,
+    editor_panes: &mut Vec<EditorPane>,
+    next_id: &mut u64,
+    focus: &mut Focus,
+) {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let state = EditorState::new(path, content);
+
+    // Center at 70% width × 80% height of the usable area
+    let fw = (screen_area.width as f32 * 0.70) as u16;
+    let fh = (screen_area.height as f32 * 0.80) as u16;
+    let fx = screen_area.x + (screen_area.width.saturating_sub(fw)) / 2;
+    let fy = screen_area.y + (screen_area.height.saturating_sub(fh)) / 2;
+
+    let id = *next_id;
+    *next_id += 1;
+
+    editor_panes.push(EditorPane {
+        id,
+        state,
+        rect: ratatui::layout::Rect { x: fx, y: fy, width: fw, height: fh },
+    });
+    *focus = Focus::Editor(id);
 }
 
 /// Open a folder in a new terminal pane (cd + shell).
@@ -835,6 +1331,24 @@ fn compute_pane_area(
         y: 0,
         width: size.width.saturating_sub(sidebar_width),
         height: size.height.saturating_sub(chrome_rows),
+    }
+}
+
+/// Compute the content area as screen-coordinate Rect (for editor pane placement).
+fn compute_screen_area(
+    terminal: &Terminal<CrosstermBackend<io::Stdout>>,
+    show_tab_bar: bool,
+    show_status_bar: bool,
+    sidebar_width: u16,
+) -> ratatui::layout::Rect {
+    let size = terminal.size().unwrap_or_default();
+    let chrome_y: u16 = if show_tab_bar { 1 } else { 0 };
+    let chrome_bot: u16 = if show_status_bar { 1 } else { 0 };
+    ratatui::layout::Rect {
+        x: sidebar_width,
+        y: chrome_y,
+        width: size.width.saturating_sub(sidebar_width),
+        height: size.height.saturating_sub(chrome_y + chrome_bot),
     }
 }
 

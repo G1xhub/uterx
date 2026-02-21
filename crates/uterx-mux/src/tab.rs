@@ -106,10 +106,17 @@ impl Tab {
     }
 
     /// Recalculate pane rects based on the current layout and available area.
+    /// Only relayouts tiled (non-floating) panes.
     pub fn relayout(&mut self, area: Rect) {
-        let rects = self.layout.compute_rects(area, self.panes.len());
-        for (pane, rect) in self.panes.iter_mut().zip(rects.into_iter()) {
-            pane.resize(rect);
+        let tiled_count = self.panes.iter().filter(|p| !p.is_floating).count();
+        let rects = self.layout.compute_rects(area, tiled_count);
+        let mut rect_iter = rects.into_iter();
+        for pane in self.panes.iter_mut() {
+            if !pane.is_floating {
+                if let Some(rect) = rect_iter.next() {
+                    pane.resize(rect);
+                }
+            }
         }
     }
 
@@ -200,6 +207,44 @@ impl Tab {
     /// Check if this tab has no panes left.
     pub fn is_empty(&self) -> bool {
         self.panes.is_empty()
+    }
+
+    /// Toggle the focused pane between tiled and floating.
+    /// When a pane becomes floating, it gets a centered default position.
+    /// When it becomes tiled, it re-joins the layout.
+    pub fn toggle_float(&mut self, area: Rect) {
+        if let Some(pane) = self.focused_pane_mut() {
+            pane.is_floating = !pane.is_floating;
+            if pane.is_floating {
+                // Set a centered floating rect (60% of area)
+                let fw = (area.width as f32 * 0.6) as u16;
+                let fh = (area.height as f32 * 0.6) as u16;
+                let fx = area.x + (area.width.saturating_sub(fw)) / 2;
+                let fy = area.y + (area.height.saturating_sub(fh)) / 2;
+                let float_rect = Rect { x: fx, y: fy, width: fw, height: fh };
+                pane.resize(float_rect);
+            }
+        }
+        // Re-layout tiled panes
+        self.relayout(area);
+    }
+
+    /// Get tiled (non-floating) panes.
+    pub fn tiled_panes(&self) -> impl Iterator<Item = &Pane> {
+        self.panes.iter().filter(|p| !p.is_floating)
+    }
+
+    /// Get floating panes.
+    pub fn floating_panes(&self) -> impl Iterator<Item = &Pane> {
+        self.panes.iter().filter(|p| p.is_floating)
+    }
+
+    /// Move a floating pane to an absolute position.
+    pub fn move_floating_pane(&mut self, pane_id: PaneId, x: u16, y: u16) {
+        if let Some(pane) = self.panes.iter_mut().find(|p| p.id == pane_id && p.is_floating) {
+            pane.rect.x = x;
+            pane.rect.y = y;
+        }
     }
 }
 
