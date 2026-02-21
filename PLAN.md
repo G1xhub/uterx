@@ -89,7 +89,7 @@ uterx/
 
 ## Development Phases
 
-### Phase 1 — Core Terminal (CURRENT — ~60% complete)
+### Phase 1 — Core Terminal (DONE — ~95% complete)
 
 #### 1.1 Workspace & Scaffolding
 - [x] Workspace `Cargo.toml` with all internal crates
@@ -97,72 +97,82 @@ uterx/
 - [x] Workspace-wide dependency management
 - [x] `cargo-xtask` setup (build-plugins, dist, docs)
 
-#### 1.2 uterx-core: VTE Parser & Cell Grid (~70%)
+#### 1.2 uterx-core: VTE Parser & Cell Grid (DONE)
 - [x] VTE parser wrapping `vte` crate with `Performer` impl
 - [x] `TerminalAction` enum (Print, Execute, CSI, ESC, OSC)
 - [x] `Cell` with content, width, `CellAttributes` (fg, bg, bold, italic, underline, strikethrough, inverse, hidden)
 - [x] `Grid` with cursor, `write_char`, `newline`, `scroll_up`, `resize`, `clear`
 - [x] `Scrollback` ring buffer (push, line access, max capacity)
 - [x] CSI basics: CUU/CUD/CUF/CUB (cursor movement), CUP/HVP (cursor position), ED (erase display — mode 2/3)
-- [ ] **SGR (Select Graphic Rendition)** — attribute parsing (bold, color, italic, etc.)
-- [ ] ED mode 0 (erase below) and mode 1 (erase above)
-- [ ] EL (Erase in Line) — CSI K
-- [ ] ESC sequence handling (charset selection, save/restore cursor, etc.)
-- [ ] OSC handling (window title, clipboard, hyperlinks)
+- [x] **SGR (Select Graphic Rendition)** — full parsing (bold, fg/bg indexed 0-255, RGB, italic, underline, inverse, strikethrough, hidden, reset)
+- [x] ED mode 0 (erase below), mode 1 (erase above)
+- [x] EL (Erase in Line) — CSI K modes 0/1/2
+- [x] ESC sequence handling (DECSC/DECRC save/restore cursor, RI reverse index, IND, NEL, RIS full reset)
+- [x] OSC handling (window title — OSC 0/2)
 - [ ] DCS sequences (DECRQSS, Sixel, etc.)
-- [ ] **Scrollback integration** — wire `Scrollback` into `Grid.scroll_up()`
+- [x] **Scrollback integration** — `Grid.scroll_up_region()` pushes evicted rows into `Scrollback`
 - [ ] Wide character / Unicode 17 support (wcwidth, grapheme clusters)
 - [ ] Ligature detection (multi-cell character runs)
-- [ ] Scroll regions (DECSTBM — CSI r)
-- [ ] Alternate screen buffer (DECSET 1049)
-- [ ] Insert/Delete lines (CSI L / CSI M)
+- [x] Scroll regions (DECSTBM — CSI r)
+- [x] Alternate screen buffer (DECSET 1049)
+- [x] Insert/Delete lines (CSI L / CSI M)
 - [ ] Tab stops (HTS, TBC)
+- [x] DEC private modes: cursor visibility (25), autowrap (7), bracketed paste (2004), application cursor (1), blinking cursor (12)
+- [x] Additional CSI: CNL, CPL, CHA, VPA, DCH, ICH, ECH, SU, SD, DSR (cursor position report)
 
-#### 1.3 uterx-platform: PTY & Shell (~80%)
+#### 1.3 uterx-platform: PTY & Shell (DONE)
 - [x] `PtyProcess` via `portable-pty` — spawn, resize, reader/writer
 - [x] `default_shell()` — Windows (`COMSPEC`/`powershell.exe`) & Linux (`$SHELL`)
 - [x] `ShellType` detection (Bash, Zsh, Fish, PowerShell, Cmd)
 - [x] `BluetoothManager` trait + placeholder `BtleplugManager`
-- [ ] **Non-blocking PTY IO** — move reader to Tokio task with channel
+- [x] **Non-blocking PTY IO** — `PtyReader` wrapper with `spawn_blocking`-based async read, mpsc channel
 - [ ] PTY child process lifecycle (wait, kill, status)
 
-#### 1.4 uterx-ui: TUI Layer (~60%)
+#### 1.4 uterx-ui: TUI Layer (DONE)
 - [x] `TerminalView` ratatui widget — renders `Grid` cells with style conversion
-- [x] `TabBar` widget with active/inactive tab styling
-- [x] `StatusBar` widget with session name, pane title, broadcast indicator
-- [x] `InputHandler` with keybinding engine (Ctrl+Q, Ctrl+N, Ctrl+W, Ctrl+T, Ctrl+F, Ctrl+Tab)
-- [ ] **Wire tab bar + status bar into event loop** (currently unused)
-- [ ] **Wire `InputHandler` into event loop** (currently hardcoded Ctrl+Q)
+- [x] `TabBar` widget — Catppuccin-themed with branding, indexed tabs, broadcast indicator, [+] and [?] buttons
+- [x] `StatusBar` widget — session badge, pane title, pane count, broadcast tag, keybinding hints
+- [x] `CommandPalette` overlay — searchable command list (Ctrl+P), keyboard nav, fuzzy filter
+- [x] `HelpOverlay` widget — full keybinding reference with sections (F1 toggle, also shown on first launch)
+- [x] `InputHandler` with keybinding engine (Ctrl+Q, Ctrl+N, Ctrl+W, Ctrl+T, Ctrl+F, Ctrl+Tab, F1, Ctrl+P)
+- [x] **Tab bar + status bar wired into event loop**
+- [x] **`InputHandler` wired into event loop** — keybinding dispatch for all actions
 - [ ] Search overlay widget
-- [ ] Mouse event handling
+- [x] **Mouse event handling** — mouse capture enabled, click-to-focus pane, scroll stubs
+- [x] **Overlay system** — Help and CommandPalette overlays render on top of terminal, intercept input
 
-#### 1.5 uterx-app: Main Binary (~50%)
+#### 1.5 uterx-app: Main Binary (DONE)
 - [x] CLI with `clap` — plugin subcommands (add, remove, list, update)
 - [x] `AppConfig` TOML loading (terminal, ui, plugins sections)
 - [x] Event loop: raw mode → PTY spawn → read/parse/render loop → cleanup
-- [x] Basic key-to-bytes conversion (Enter, arrows, Ctrl+letter, special keys)
+- [x] Basic key-to-bytes conversion (Enter, arrows, Ctrl+letter, special keys, F1-F12)
 - [x] Terminal resize handling
-- [ ] **Async event loop** — replace blocking PTY read with Tokio tasks + channels
-- [ ] Integrate `TabBar` and `StatusBar` in rendering
-- [ ] Integrate `InputHandler` for keybindings
-- [ ] Integrate `uterx-mux` (Session/Tab/Pane lifecycle)
-- [ ] Config file creation on first launch
+- [x] **Async event loop** — Tokio `select!` on PTY mpsc channel + crossterm `EventStream`
+- [x] **TabBar + StatusBar + TerminalView** rendering with ratatui `Layout`
+- [x] **InputHandler** wired for keybinding dispatch
+- [x] **Integrate `uterx-mux`** (Session/Tab/Pane lifecycle) — Sprint 2
+- [x] **Config file creation on first launch** — writes default `~/.uterx/config.toml` with comments
 - [ ] Crash reporting
 
-### Phase 2 — Multiplexer (~40% scaffolding done)
+### Phase 2 — Multiplexer (CURRENT — ~85% done)
 - [x] `PaneId`, `Pane` struct with Grid, rect, focus
 - [x] `TabId`, `Tab` struct with panes, layout, broadcast, focus management
 - [x] `Session` with ID generator, save/restore placeholders
 - [x] `Layout` engine — Single, HorizontalSplit, VerticalSplit, Tiled, Floating
 - [x] `Layout::compute_rects()` — distributes panes in available area
-- [ ] **Wire PTY into Pane** — each pane owns a PtyProcess + Parser
-- [ ] Pane split operations (split-h, split-v from active pane)
-- [ ] Pane close, focus cycling (next/prev)
-- [ ] Tab create/close/switch
-- [ ] Session persistence (save to JSON/TOML, restore on launch)
-- [ ] Broadcast mode input routing
-- [ ] Mouse-based pane resizing (drag borders)
-- [ ] Drag-and-drop pane reordering
+- [x] **Wire PTY into Pane** — each `Pane` owns `PtyProcess` + `Parser` + async reader task
+- [x] **Pane split operations** — `split_horizontal()` / `split_vertical()` on `Tab`
+- [x] **Pane close, focus cycling** — `remove_pane()`, `focus_next()`, `focus_prev()`, visual border indicator
+- [x] **Tab create/close/switch** — `Session::create_tab()`, `close_tab()`, `next_tab()`, `prev_tab()`
+- [x] **Broadcast mode** — `toggle_broadcast()`, input routed to all panes when active
+- [x] **Event loop rewritten** — uses Session/Tab/Pane architecture, all actions wired
+- [x] **Keybindings** — Alt+H split-h, Alt+V split-v, Alt+Left/Right focus, Alt+B broadcast, Ctrl+T tab, Ctrl+W close
+- [x] **Session persistence** — save to TOML on exit (`~/.uterx/sessions/`), restore with PTY re-spawning
+- [x] **Mouse support** — click-to-focus pane, mouse capture on/off, scroll stubs
+- [ ] Session auto-restore on launch (CLI flag) ← Sprint 4
+- [ ] Mouse-based pane border drag resizing ← Sprint 4
+- [ ] Drag-and-drop pane reordering ← later
+- **Tests:** 8 unit tests (tab: add/focus, cycling, remove, split, broadcast, relayout; session: roundtrip, save/load)
 
 ### Phase 3 — GPU Rendering (~20% scaffolding done)
 - [x] `GlyphAtlas` with `fontdue` rasterization + cache structure
@@ -329,3 +339,9 @@ Build plugins in priority order:
 |------------|---------|------------------------------------|---------------------------------------------|
 | 2026-02-20 | Phase 1 | Project scaffolding created        | All crate skeletons done                    |
 | 2026-02-21 | Phase 1 | Code audit & build fix             | Fixed workspace members, tracing-subscriber env-filter, unused imports. Project compiles cleanly. |
+| 2026-02-21 | Phase 1 | **Sprint 1 complete**              | Full SGR (256+RGB), async PTY IO, scrollback integration, ED/EL, alt screen, scroll regions, insert/delete lines, ESC/OSC handling, DEC private modes, UI integration (TabBar+StatusBar+InputHandler). 13 tests pass. |
+| 2026-02-21 | Phase 2 | Sprint 2 started                   | Multiplexer basics: Pane↔PTY binding, Session/Tab/Pane lifecycle, splits, focus, broadcast. |
+| 2026-02-21 | Phase 2 | **Sprint 2 complete**              | Pane owns PTY+Parser+async reader. Tab: split-h/v, focus cycling, remove, broadcast, relayout. Session: create/close/switch tabs, split delegation. Event loop rewritten for mux. 6 new mux tests + 13 core tests = 19 total passing. |
+| 2026-02-21 | Phase 2 | **Sprint 3 complete**              | Session persistence (save TOML on exit, load+restore with PTY respawn). Config auto-creation on first launch. Mouse capture + click-to-focus pane. 21 total tests (13 core + 8 mux). |
+| 2026-02-22 | Phase 2 | **UI Overhaul complete**            | Catppuccin theme. Redesigned TabBar (branding, indexed tabs, [+]/[?] buttons, broadcast indicator). Redesigned StatusBar (session badge, pane count, keybinding hints). New HelpOverlay (F1, replaces old tutorial — sections: General, Tabs, Panes, Broadcast, Config). New CommandPalette (Ctrl+P, fuzzy filter, keyboard nav, executes actions). Overlay system (Help/CommandPalette render on top, intercept input). Pane borders themed (blue=focused, dim=unfocused). First-launch shows help overlay automatically. 21 tests passing. |
+| 2026-02-22 | Phase 2 | **File Browser & Desktop Features** | File browser sidebar (Ctrl+E toggle). Tree-view with expand/collapse, file icons (Nerd Font), cursor navigation, scroll, Catppuccin theme. Focus system (Terminal ↔ FileBrowser). Sidebar layout (horizontal split). Folder→pane: Right arrow on folder opens new tab cd'd into directory. Mouse click in sidebar focuses file browser. Command palette + help overlay updated with File Browser entries. Event loop fully rewritten with Focus enum, sidebar-aware pane area, file browser input handling. 21 tests passing. |

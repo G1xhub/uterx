@@ -19,6 +19,7 @@ uterx-platform = { path = "../uterx-platform" }
 
 tokio = { workspace = true }
 crossterm = { workspace = true }
+futures = { workspace = true }
 ratatui = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

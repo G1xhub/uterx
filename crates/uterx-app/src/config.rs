@@ -37,6 +37,8 @@ pub struct UiConfig {
     pub show_tab_bar: bool,
     /// Show status bar.
     pub show_status_bar: bool,
+    /// Whether the first-launch tutorial has been shown.
+    pub first_launch_done: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +77,7 @@ impl Default for UiConfig {
             font_size: 14.0,
             show_tab_bar: true,
             show_status_bar: true,
+            first_launch_done: false,
         }
     }
 }
@@ -90,6 +93,7 @@ impl Default for PluginConfig {
 
 impl AppConfig {
     /// Load config from a file path. Falls back to defaults if the file doesn't exist.
+    /// Creates a default config file on first launch.
     pub fn load(path: Option<&str>) -> anyhow::Result<Self> {
         let config_path = match path {
             Some(p) => PathBuf::from(p),
@@ -101,8 +105,25 @@ impl AppConfig {
             let cfg: Self = toml::from_str(&content)?;
             Ok(cfg)
         } else {
-            Ok(Self::default())
+            // First launch — create default config
+            let cfg = Self::default();
+            cfg.save_default(&config_path)?;
+            Ok(cfg)
         }
+    }
+
+    /// Save the default config to disk so users have a template to edit.
+    fn save_default(&self, path: &PathBuf) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let toml_str = toml::to_string_pretty(self)?;
+        let header = "# uterx configuration\n\
+                      # Edit this file to customize your terminal.\n\
+                      # See PLAN.md for documentation.\n\n";
+        std::fs::write(path, format!("{}{}", header, toml_str))?;
+        tracing::info!("created default config at {}", path.display());
+        Ok(())
     }
 
     /// Default config file location: ~/.uterx/config.toml
@@ -121,6 +142,26 @@ impl AppConfig {
             .shell
             .clone()
             .unwrap_or_else(|| uterx_platform::shell::default_shell())
+    }
+
+    /// Check if this is the first launch (tutorial not yet shown).
+    pub fn is_first_launch(&self) -> bool {
+        !self.ui.first_launch_done
+    }
+
+    /// Mark the tutorial as shown and persist to config file.
+    pub fn mark_first_launch_done(&mut self) -> anyhow::Result<()> {
+        self.ui.first_launch_done = true;
+        let config_path = Self::default_config_path();
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let toml_str = toml::to_string_pretty(self)?;
+        let header = "# uterx configuration\n\
+                      # Edit this file to customize your terminal.\n\
+                      # See PLAN.md for documentation.\n\n";
+        std::fs::write(&config_path, format!("{}{}", header, toml_str))?;
+        Ok(())
     }
 }
 

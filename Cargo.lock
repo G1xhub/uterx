@@ -665,6 +665,7 @@ checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
 dependencies = [
  "bitflags 2.11.0",
  "crossterm_winapi",
+ "futures-core",
  "mio",
  "parking_lot",
  "rustix 0.38.44",
@@ -2820,6 +2821,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "futures",
  "ratatui",
  "serde",
  "tokio",
@@ -2851,8 +2853,11 @@ dependencies = [
  "anyhow",
  "serde",
  "thiserror 2.0.18",
+ "tokio",
+ "toml",
  "tracing",
  "uterx-core",
+ "uterx-platform",
 ]
 
 [[package]]

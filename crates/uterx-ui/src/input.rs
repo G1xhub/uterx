@@ -20,6 +20,14 @@ pub enum Action {
     ToggleBroadcast,
     Search,
     Fullscreen,
+    /// Show help / tutorial overlay.
+    ShowHelp,
+    /// Open command palette overlay.
+    CommandPalette,
+    /// Toggle file browser sidebar.
+    ToggleFileBrowser,
+    /// Open a folder in a new pane (cd into it).
+    OpenFolder(String),
     /// Pass raw input to the active pane's PTY.
     RawInput(Vec<u8>),
 }
@@ -46,7 +54,7 @@ impl InputHandler {
             KeyBinding { code: KeyCode::Char('q'), modifiers: KeyModifiers::CONTROL },
             Action::Quit,
         );
-        // Ctrl+N = New pane
+        // Ctrl+N = New pane (vertical split)
         bindings.insert(
             KeyBinding { code: KeyCode::Char('n'), modifiers: KeyModifiers::CONTROL },
             Action::NewPane,
@@ -70,6 +78,51 @@ impl InputHandler {
         bindings.insert(
             KeyBinding { code: KeyCode::Char('f'), modifiers: KeyModifiers::CONTROL },
             Action::Search,
+        );
+        // Alt+H = Split horizontal (top/bottom)
+        bindings.insert(
+            KeyBinding { code: KeyCode::Char('h'), modifiers: KeyModifiers::ALT },
+            Action::SplitHorizontal,
+        );
+        // Alt+V = Split vertical (left/right)
+        bindings.insert(
+            KeyBinding { code: KeyCode::Char('v'), modifiers: KeyModifiers::ALT },
+            Action::SplitVertical,
+        );
+        // Alt+Right = Focus next pane
+        bindings.insert(
+            KeyBinding { code: KeyCode::Right, modifiers: KeyModifiers::ALT },
+            Action::NextPane,
+        );
+        // Alt+Left = Focus previous pane
+        bindings.insert(
+            KeyBinding { code: KeyCode::Left, modifiers: KeyModifiers::ALT },
+            Action::PrevPane,
+        );
+        // Alt+B = Toggle broadcast mode
+        bindings.insert(
+            KeyBinding { code: KeyCode::Char('b'), modifiers: KeyModifiers::ALT },
+            Action::ToggleBroadcast,
+        );
+        // Ctrl+Shift+Tab = Previous tab
+        bindings.insert(
+            KeyBinding { code: KeyCode::BackTab, modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT },
+            Action::PrevTab,
+        );
+        // F1 = Show help overlay
+        bindings.insert(
+            KeyBinding { code: KeyCode::F(1), modifiers: KeyModifiers::NONE },
+            Action::ShowHelp,
+        );
+        // Ctrl+P = Command palette
+        bindings.insert(
+            KeyBinding { code: KeyCode::Char('p'), modifiers: KeyModifiers::CONTROL },
+            Action::CommandPalette,
+        );
+        // Ctrl+E = Toggle file browser
+        bindings.insert(
+            KeyBinding { code: KeyCode::Char('e'), modifiers: KeyModifiers::CONTROL },
+            Action::ToggleFileBrowser,
         );
 
         Self { bindings }

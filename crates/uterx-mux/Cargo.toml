@@ -7,7 +7,10 @@ license.workspace = true
 
 [dependencies]
 uterx-core = { workspace = true }
+uterx-platform = { path = "../uterx-platform" }
 serde = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

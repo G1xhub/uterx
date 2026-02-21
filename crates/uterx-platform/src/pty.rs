@@ -2,34 +2,6 @@
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::Write;
-use tokio::io::AsyncRead;
-
-/// An async-capable reader wrapping the PTY's synchronous reader.
-/// Runs blocking reads on Tokio's blocking thread pool.
-pub struct AsyncPtyReader {
-    inner: Option<Box<dyn std::io::Read + Send>>,
-}
-
-impl AsyncPtyReader {
-    fn new(reader: Box<dyn std::io::Read + Send>) -> Self {
-        Self {
-            inner: Some(reader),
-        }
-    }
-}
-
-impl AsyncRead for AsyncPtyReader {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-        _buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        // We don't use poll_read directly — see the spawn_blocking approach below.
-        // This impl exists so the type can be used with tokio::io::AsyncReadExt
-        // via the wrapper.
-        std::task::Poll::Pending
-    }
-}
 
 /// Wrapper that provides async read via spawn_blocking.
 pub struct PtyReader {
