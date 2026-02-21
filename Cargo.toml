@@ -43,6 +43,7 @@ ratatui = "0.29"
 # GPU Rendering
 wgpu = "24"
 fontdue = "0.9"
+raw-window-handle = "0.6"
 
 # VTE parsing
 vte = "0.13"

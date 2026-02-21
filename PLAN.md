@@ -175,22 +175,23 @@ uterx/
 - [x] **Mouse support** — click-to-focus pane, mouse capture on/off, scroll stubs
 - [x] **File browser → pane** — Right-arrow on folder opens new tab cd'd into that directory, folder name as pane title
 - [x] **Sidebar-aware layout** — Pane area computed with sidebar offset, resize events account for sidebar width
-- [ ] Session auto-restore on launch (CLI flag) ← Sprint 4
-- [ ] Mouse-based pane border drag resizing ← Sprint 4
-- [ ] Drag-and-drop pane reordering ← later
-- **Tests:** 8 unit tests (tab: add/focus, cycling, remove, split, broadcast, relayout; session: roundtrip, save/load)
+- [x] Session auto-restore on launch (CLI flag) ← Sprint 4
+- [x] Mouse-based pane border drag resizing ← Sprint 4
+- [x] Drag-and-drop pane reordering (tiled panes)
+- **Tests:** 12 unit tests (tab: add/focus, cycling, remove, split, broadcast, relayout, split-boundary resize+clamp, tiled reorder; session: roundtrip, save/load)
 
 ### Phase 3 — GPU Rendering (~20% scaffolding done)
 - [x] `GlyphAtlas` with `fontdue` rasterization + cache structure
 - [x] `Renderer` placeholder struct with config
-- [ ] wgpu device/surface/adapter initialization (platform-aware: DX12/Vulkan/GL)
-- [ ] Glyph atlas texture packing (shelf or skyline algorithm)
-- [ ] Vertex buffer generation from grid cells
-- [ ] Render pipeline (shaders, bind groups, draw calls)
-- [ ] Damage tracking (only re-render changed cells)
-- [ ] Dedicated render thread with channel-based updates
+- [x] wgpu adapter + device + queue initialization (headless, no surface)
+- [x] Surface/window integration for presentation path (platform-aware config + present path)
+- [x] Glyph atlas texture packing (shelf algorithm + cache insertion)
+- [x] Vertex/instance data generation from grid cells (frame geometry builder)
+- [x] Render pipeline skeleton (WGSL shader + bind group + draw-call encoder)
+- [x] Damage tracking (dirty cells/rows; only changed-cell geometry rebuild)
+- [x] Dedicated render thread with channel-based updates
 - [ ] Ligature rendering
-- [ ] Cursor rendering (block, bar, underline styles)
+- [x] Cursor rendering (block, bar, underline styles)
 - [ ] Selection highlighting
 - [ ] Smooth scrolling
 
@@ -353,3 +354,137 @@ Build plugins in priority order:
 | 2026-02-22 | Phase 2 | **File Browser & Desktop Features** | File browser sidebar (Ctrl+E toggle). Tree-view with expand/collapse, file icons (Nerd Font), cursor navigation, scroll, Catppuccin theme. Focus system (Terminal ↔ FileBrowser). Sidebar layout (horizontal split). Folder→pane: Right arrow on folder opens new tab cd'd into directory. Mouse click in sidebar focuses file browser. Command palette + help overlay updated with File Browser entries. Event loop fully rewritten with Focus enum, sidebar-aware pane area, file browser input handling. 21 tests passing. |
 | 2026-02-23 | Phase 2 | **Mouse Tab Navigation & Floating Panes** | Mouse-driven tab bar: click tab label to switch, [+] to create tab, [?] to open help. Floating panes (Alt+F): toggle focused pane to free-floating, centered at 60% of terminal area. Drag title bar to move floating pane. Floating panes render on top of tiled panes with drop shadow (Catppuccin crust) and pink accent border (focused) / blue (unfocused). `DragState` tracks drag offset for smooth movement. `Pane::is_floating`, `Tab::toggle_float()`, `Tab::move_floating_pane()`, `Tab::tiled_panes()`, `Tab::floating_panes()` added. Command palette + help overlay updated. 21 tests passing. |
 | 2026-02-21 | Phase 2 | **File Browser Search + Floating Editor** | File browser search (`/`): local fuzzy filter in current entries + recursive tree walk (Tab toggles, max 200 results). Yellow match highlighting, Up/Down result navigation, Enter to open/jump. Floating editor pane: `syntect` syntax highlighting (base16-ocean.dark), modal vim editing (Normal/Insert), undo stack, Ctrl+S save, Ctrl+W close guard (2-press). Opens text/code files from browser or search results; drag title bar to reposition. New types: `Focus::Editor(u64)`, `EditorPane`, `EditorDragState`, `EditorState`, `EditorWidget`. Help overlay expanded (File Browser, Editor Normal, Editor Insert). Command palette: "Search Files" entry. `syntect = "5"` added to uterx-ui. 21 tests passing. |
+| 2026-02-21 | Phase 2 | **Resize + Desktop Click UX + Auto-Restore** | Tiled pane border drag resizing implemented for `VerticalSplit`/`HorizontalSplit` with min pane constraints (10x4), ratio clamping, and relayout-on-drag. Added `Tab::adjust_split_boundary(...)` and split boundary hit-testing in event loop. File Browser mouse behavior now desktop-like: single-click selects, double-click opens file or expands/collapses directory. Tab click hit-testing aligned with rendered tab labels so tab switching is reliable. Added launch restore flow with CLI toggle `--no-restore`: app restores from `~/.uterx/sessions/main.toml` when available, otherwise falls back to fresh session. Mux tests increased to 11 passing; workspace `cargo check` passes. |
+| 2026-02-21 | Phase 2 | **Pane Reordering complete** | Drag-and-drop reordering for tiled panes implemented: drag from tiled pane title bar and drop onto another tiled pane to reorder pane vector and relayout. Added `Tab::reorder_tiled_panes(dragged, target)` with new mux test coverage. Existing interactions remain prioritized (editor drag, split resize, floating drag). `cargo check` passes; mux tests increased to 12 passing. |
+| 2026-02-21 | Phase 3 | **wgpu Init Kickoff (headless)** | `uterx-render::Renderer` now supports real GPU bootstrap via `try_init_wgpu()` with `wgpu::Instance`, adapter selection, and `Device`/`Queue` creation. Added `GpuState` storage and adapter diagnostics (`adapter_info`). Rendering path remains placeholder but now distinguishes initialized vs non-initialized GPU state. Exported `RendererConfig` and `GpuState` from render crate. Workspace `cargo build` and `cargo check` succeed. |
+| 2026-02-21 | Phase 3 | **Grid → Frame Geometry** | Added per-cell frame geometry generation in `uterx-render`: `CellInstance` + `FrameGeometry` with position, size, resolved fg/bg colors, codepoint, and style flags per grid cell. `Renderer::build_frame_geometry()` now produces instance-ready data from `Grid`; `render()` stores last frame snapshot for upcoming GPU buffer upload. Added render-crate tests for geometry count/content and inverse-color swapping. `cargo test -p uterx-render` (2 tests) and workspace `cargo check` pass. |
+| 2026-02-21 | Phase 3 | **Damage Tracking (dirty cells/rows)** | Added `DamageReport` and grid snapshot diffing in renderer: first frame/full resize triggers full redraw, subsequent frames mark only changed cells/rows. `render()` now computes damage and builds geometry only for dirty cells when possible (`build_damage_geometry`). Added tests for no-op frames, single-cell diffs, and dirty-instance generation. `cargo test -p uterx-render` now 4 tests passing; workspace `cargo check` passes. |
+| 2026-02-21 | Phase 3 | **Render Pipeline Skeleton** | Added WGSL shader module, globals uniform buffer, bind-group layout, bind group, and render pipeline creation in `Renderer::try_init_pipeline(format)`. Added viewport uniform update helper and `encode_render_pass()` that emits a real draw call (`draw(0..3, 0..1)`) into a caller-provided `TextureView`. This keeps rendering headless/surface-agnostic while establishing shaders + bind groups + draw path for later surface integration. `cargo test -p uterx-render` now 5 tests passing; workspace `cargo check` passes. |
+| 2026-02-21 | Phase 3 | **Glyph Atlas Shelf Packing** | Implemented shelf-based texture packing in `GlyphAtlas`: atlas dimensions/pixel storage, shelf tracking, best-fit shelf placement, bitmap upload into atlas alpha buffer, and cache-backed `get_or_insert(key)` API. Added atlas sizing/pixel accessors for upcoming GPU texture upload stage. Added atlas tests for cache behavior and bitmap write validation. `cargo test -p uterx-render` now 7 tests passing; workspace `cargo check` passes. |
+| 2026-02-21 | Phase 3 | **Dedicated Render Thread** | Added `render_thread` module with channel-based command loop (`UpdateGrid`, `Flush`, `Shutdown`) running on a dedicated thread. The thread owns a renderer instance, processes incoming grid snapshots, and tracks frame statistics (`frames_processed`, instance count, changed cells). Exposed `RenderThreadHandle` API (`start`, `send_grid`, `flush`, `stats`, `shutdown`) and re-exported from render crate. Added unit test for processing multiple updates. `cargo test -p uterx-render` now 8 tests passing. |
+| 2026-02-21 | Phase 3 | **Cursor Rendering Styles** | Added explicit cursor rendering primitives in renderer with `CursorStyle` (`Block`, `Bar`, `Underline`) and `CursorInstance` geometry included in `FrameGeometry`. `RendererConfig` now carries cursor style; geometry builder emits cursor quad with style-specific dimensions/placement. Damage tracking now considers cursor movement by marking old/new cursor cells dirty so cursor-only movement can trigger targeted updates. Exported cursor types from render crate API. `cargo test -p uterx-render` now 9 tests passing; workspace `cargo check` passes. |
+| 2026-02-21 | Phase 3 | **Surface/Window Presentation Path** | Added surface integration APIs in renderer: unsafe window-handle based `try_init_surface_from_window`, capability-driven `configure_surface`, and `render_to_surface` with robust frame acquisition handling (`Lost/Outdated` reconfigure, `Timeout` skip, `OutOfMemory` error). Added `SurfaceState` and format/present/alpha selection helpers with tests. Render crate now supports full configure+present path while remaining app-window-framework agnostic. `cargo test -p uterx-render` now 10 tests passing; `cargo check -p uterx-render` passes cleanly. |
+| 2026-02-21 | Phase 7 | **Feature Brainstorming** | 10 innovative new features designed: Smart Workspace Manager, Pane Snippets & Templates, Real-time Process Monitor, Intelligent Search Across Panes, Pane History & Replay, Collaborative Editing, Keyboard Macro System, Integrated Git Graph, Task Runner & Dashboard, Smart Notifications & Alerts. Top 3 recommendations prioritized for performance and innovation. |
+
+---
+
+## Phase 7 — Innovative Features (Planned)
+
+### Overview
+
+Based on the "Terminal Desktop" concept and uterx's modular architecture, the following innovative features are proposed to extend functionality while maintaining high performance across low-end to high-end devices.
+
+### Feature List
+
+#### 1. Smart Workspace Manager
+- **Description**: Named workspace presets for different development contexts
+- **Use Cases**: "Dev" workspace (terminal, editor, file browser), "Admin" workspace (SSH panes, network monitor)
+- **Integration**: Extends Session system with named presets, stored in config
+- **Performance**: Minimal overhead - only configuration stored
+- **Implementation Priority**: High (top 3)
+- **Key Components**: `WorkspaceManager`, `WorkspaceConfig`, workspace save/restore commands
+
+#### 2. Pane Snippets & Templates
+- **Description**: Reusable pane configurations for common workflows
+- **Use Cases**: "Docker Dev" = 3 panes (logs, shell, db), "Frontend" = (npm run dev, git, editor)
+- **Integration**: Command palette → Template selection → Auto-layout
+- **Performance**: One-time configuration, instant availability
+- **Implementation Priority**: Medium
+- **Key Components**: `PaneTemplate`, template registry, template application logic
+
+#### 3. Real-time Process Monitor
+- **Description**: Visual system resource monitoring (CPU, RAM, Disk, Network)
+- **Use Cases**: Like htop but in uterx style, floating pane with Catppuccin theme
+- **Integration**: New widget in `uterx-ui`, uses OS abstractions
+- **Performance**: Updates every 1-2 seconds, async
+- **Implementation Priority**: High (top 3)
+- **Key Components**: `ProcessMonitorWidget`, OS metrics collectors, async update loop
+
+#### 4. Intelligent Search Across Panes
+- **Description**: Global search across all open terminals and files
+- **Use Cases**: `Ctrl+Shift+F` → search text → results in all panes
+- **Integration**: Extends parser results, fuzzy matching
+- **Performance**: Incremental search, background threads
+- **Implementation Priority**: High
+- **Key Components**: `GlobalSearchEngine`, `SearchOverlay`, pane content indexing
+
+#### 5. Pane History & Replay
+- **Description**: Time travel through pane contents
+- **Use Cases**: Clickable timestamps restore pane state, like iTerm2 Shell Integration
+- **Integration**: Extends Scrollback with metadata and snapshots
+- **Performance**: Stores only changes, not full snapshots
+- **Implementation Priority**: Medium
+- **Key Components**: `HistoryManager`, `HistorySnapshot`, timestamp metadata
+
+#### 6. Collaborative Editing
+- **Description**: Multi-user pane sharing (remote or local)
+- **Use Cases**: Pair programming via WebRTC or local multi-terminal
+- **Integration**: Extends Session system, new event types
+- **Performance**: Optimized delta sync, only changed areas transmitted
+- **Implementation Priority**: Low (complex)
+- **Key Components**: `CollaborationManager`, delta sync protocol, WebRTC integration
+
+#### 7. Keyboard Macro System
+- **Description**: Record and replay keyboard sequences
+- **Use Cases**: `Ctrl+R` to record → enter sequence → `Ctrl+P` to replay
+- **Integration**: Extends InputHandler, stores macros in config
+- **Performance**: Minimal overhead, pure event replay
+- **Implementation Priority**: Medium
+- **Key Components**: `MacroRecorder`, `MacroPlayer`, macro storage
+
+#### 8. Integrated Git Graph
+- **Description**: Visual Git history and branch display
+- **Use Cases**: Floating pane shows graph like GitKraken/Sourcetree, clickable commits
+- **Integration**: New widget, calls git commands, parses output
+- **Performance**: Lazy loading, only visible commits rendered
+- **Implementation Priority**: High
+- **Key Components**: `GitGraphWidget`, git command parser, graph layout engine
+
+#### 9. Task Runner & Dashboard
+- **Description**: Define and execute build/test/deploy tasks
+- **Use Cases**: Dashboard shows running task status, logs in separate panes
+- **Integration**: Task config in TOML, async task runner
+- **Performance**: Tasks run in separate threads, UI remains responsive
+- **Implementation Priority**: Medium
+- **Key Components**: `TaskRunner`, `TaskDashboard`, task configuration parser
+
+#### 10. Smart Notifications & Alerts
+- **Description**: Visual notifications for important events
+- **Use Cases**: Toast overlay for completed long-running commands, errors
+- **Integration**: Extends Event system, animation framework
+- **Performance**: Non-blocking, async rendering
+- **Implementation Priority**: Low
+- **Key Components**: `NotificationManager`, `ToastOverlay`, notification queue
+
+### Top 3 Recommendations (Priority Order)
+
+Based on performance impact, implementation complexity, and user value:
+
+1. **Smart Workspace Manager** — Maximum productivity, low implementation effort
+2. **Real-time Process Monitor** — Great performance showcase, perfect "Terminal Desktop" fit
+3. **Integrated Git Graph** — High developer value, visually impressive
+
+### Implementation Phases
+
+#### Phase 7.1: Quick Wins (Low complexity, high value)
+- Smart Workspace Manager
+- Keyboard Macro System
+- Smart Notifications & Alerts
+
+#### Phase 7.2: Core Features (Medium complexity)
+- Real-time Process Monitor
+- Pane Snippets & Templates
+- Task Runner & Dashboard
+- Integrated Git Graph
+
+#### Phase 7.3: Advanced Features (High complexity)
+- Intelligent Search Across Panes
+- Pane History & Replay
+- Collaborative Editing
+
+### Technical Considerations
+
+- **Performance**: All features designed for low-end devices with async operations and efficient data structures
+- **Modularity**: Each feature can be developed independently as separate widgets/extensions
+- **Consistency**: All features follow uterx's Catppuccin theme and UX patterns
+- **Extensibility**: Features use existing abstractions (Session, Pane, Widget system)

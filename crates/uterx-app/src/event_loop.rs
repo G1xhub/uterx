@@ -31,14 +31,15 @@ use ratatui::{
     Terminal,
 };
 use std::io;
-use uterx_mux::{Rect as MuxRect, Session};
+use std::time::{Duration, Instant};
+use uterx_mux::{Layout as MuxLayout, Rect as MuxRect, Session};
 use uterx_ui::input::{Action, InputHandler};
 use uterx_ui::widgets::command_palette::{default_commands, CommandEntry, CommandPalette};
 use uterx_ui::widgets::editor::{EditorState, EditorWidget, EditorMode};
 use uterx_ui::widgets::file_browser::{FileBrowserState, FileBrowserWidget};
 use uterx_ui::widgets::help_overlay::HelpOverlay;
 use uterx_ui::widgets::status_bar::StatusBar;
-use uterx_ui::widgets::tab_bar::{TabBar, TabInfo};
+use uterx_ui::widgets::tab_bar::{TabBar, TabBarHover, TabInfo};
 use uterx_ui::TerminalView;
 
 /// UI overlay state.
@@ -79,8 +80,27 @@ struct EditorDragState {
     offset_x: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SplitResizeOrientation {
+    Horizontal,
+    Vertical,
+}
+
+/// State for mouse-dragging a tiled split border.
+struct SplitResizeDragState {
+    boundary_index: usize,
+    orientation: SplitResizeOrientation,
+    last_col: u16,
+    last_row: u16,
+}
+
+/// State for drag-and-drop reordering of tiled panes.
+struct TiledReorderDragState {
+    pane_id: uterx_mux::PaneId,
+}
+
 /// Run the main terminal event loop.
-pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
+pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<()> {
     // Setup terminal
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -105,22 +125,14 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
     let show_tab_bar = cfg.ui.show_tab_bar;
     let show_status_bar = cfg.ui.show_status_bar;
 
-    // Create session with an initial tab + pane
-    let mut session = Session::new("main");
     let pane_area = MuxRect {
         x: 0,
         y: 0,
         width: cols,
         height: rows,
     };
-    session.create_tab(&shell, pane_area)?;
-
-    // Set the first pane as focused
-    if let Some(tab) = session.active_tab_mut() {
-        if let Some(pane) = tab.focused_pane_mut() {
-            pane.focused = true;
-        }
-    }
+    let mut session = build_initial_session(&shell, pane_area, restore_on_launch)?;
+    normalize_focus_state(&mut session);
 
     let input_handler = InputHandler::new();
 
@@ -147,9 +159,14 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
     let mut editor_panes: Vec<EditorPane> = Vec::new();
     let mut next_editor_id: u64 = 1;
     let mut editor_dragging: Option<EditorDragState> = None;
+    let mut split_resize_dragging: Option<SplitResizeDragState> = None;
+    let mut tiled_reorder_dragging: Option<TiledReorderDragState> = None;
+    let mut tab_bar_hover: Option<TabBarHover> = None;
+    let mut file_browser_hover_entry: Option<usize> = None;
 
     // crossterm event stream
     let mut event_stream = EventStream::new();
+    let mut file_browser_last_click: Option<(usize, Instant)> = None;
 
     tracing::info!(
         "event loop started ({}x{}, shell={}, session={})",
@@ -215,7 +232,9 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                         }
                     })
                     .collect();
-                let tab_bar = TabBar::new(&tabs).broadcast(broadcast);
+                let tab_bar = TabBar::new(&tabs)
+                    .broadcast(broadcast)
+                    .hover(tab_bar_hover);
                 frame.render_widget(tab_bar, v_chunks[v_idx]);
                 v_idx += 1;
             }
@@ -240,7 +259,8 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
 
             // ── File browser sidebar ──
             if let Some(sb_area) = sidebar_area {
-                let fb_widget = FileBrowserWidget::new(&file_browser, fb_focused);
+                let fb_widget = FileBrowserWidget::new(&file_browser, fb_focused)
+                    .hovered_entry(file_browser_hover_entry);
                 frame.render_widget(fb_widget, sb_area);
             }
 
@@ -932,9 +952,68 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                             let sidebar_w = if file_browser.visible { file_browser.width } else { 0 };
                             let chrome_y = if show_tab_bar { 1u16 } else { 0 };
 
+                            let term_width = terminal.size().map(|s| s.width).unwrap_or(80);
+                            tab_bar_hover = if show_tab_bar && mouse.row == 0 {
+                                tab_bar_hover_at(mouse.column, term_width, &session)
+                            } else {
+                                None
+                            };
+
+                            file_browser_hover_entry = if file_browser.visible && mouse.column < sidebar_w {
+                                let header_offset = chrome_y + 2;
+                                if mouse.row >= header_offset {
+                                    let hovered_idx = file_browser.scroll_offset
+                                        + (mouse.row - header_offset) as usize;
+                                    if hovered_idx < file_browser.entries.len() {
+                                        Some(hovered_idx)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+
                             // ── Handle active drag of a floating pane ──
                             match mouse.kind {
                                 MouseEventKind::Drag(MouseButton::Left) => {
+                                    if tiled_reorder_dragging.is_some() {
+                                        continue;
+                                    }
+                                    if let Some(ref mut split_drag) = split_resize_dragging {
+                                        let delta = match split_drag.orientation {
+                                            SplitResizeOrientation::Vertical => {
+                                                mouse.column as i16 - split_drag.last_col as i16
+                                            }
+                                            SplitResizeOrientation::Horizontal => {
+                                                mouse.row as i16 - split_drag.last_row as i16
+                                            }
+                                        };
+                                        if delta != 0 {
+                                            let area = compute_pane_area(
+                                                &terminal,
+                                                show_tab_bar,
+                                                show_status_bar,
+                                                sidebar_w,
+                                            );
+                                            if let Some(tab) = session.active_tab_mut() {
+                                                let changed = tab.adjust_split_boundary(
+                                                    area,
+                                                    split_drag.boundary_index,
+                                                    delta,
+                                                    10,
+                                                    4,
+                                                );
+                                                if changed {
+                                                    split_drag.last_col = mouse.column;
+                                                    split_drag.last_row = mouse.row;
+                                                }
+                                            }
+                                        }
+                                        continue;
+                                    }
                                     // Editor pane drag takes priority
                                     if let Some(ref ed) = editor_dragging {
                                         let eid = ed.editor_id;
@@ -963,8 +1042,26 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     }
                                 }
                                 MouseEventKind::Up(MouseButton::Left) => {
+                                    if let Some(reorder_drag) = tiled_reorder_dragging.take() {
+                                        let adj_col = mouse.column.saturating_sub(sidebar_w);
+                                        let adj_row = mouse.row.saturating_sub(chrome_y);
+                                        let area = compute_pane_area(
+                                            &terminal,
+                                            show_tab_bar,
+                                            show_status_bar,
+                                            sidebar_w,
+                                        );
+                                        if let Some(tab) = session.active_tab_mut() {
+                                            if let Some(target_id) = hit_tiled_pane(tab, adj_col, adj_row) {
+                                                if tab.reorder_tiled_panes(reorder_drag.pane_id, target_id) {
+                                                    tab.relayout(area);
+                                                }
+                                            }
+                                        }
+                                    }
                                     dragging = None;
                                     editor_dragging = None;
+                                    split_resize_dragging = None;
                                     continue;
                                 }
                                 _ => {}
@@ -975,34 +1072,20 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                 if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
                                     // Compute tab hit zones (same layout as TabBar widget)
                                     // Brand: " uterx " (7) + separator (1) = offset 8
-                                    let brand_width: u16 = 8; // " uterx │"
-                                    let right_section_width: u16 = 12;
-                                    let term_width = terminal.size().map(|s| s.width).unwrap_or(80);
-                                    let plus_x = term_width.saturating_sub(right_section_width);
-                                    let help_x = plus_x + 5;
-
-                                    // [+] button: columns plus_x..plus_x+5
-                                    if mouse.column >= plus_x && mouse.column < plus_x + 5 {
-                                        let area = compute_pane_area(&terminal, show_tab_bar, show_status_bar, sidebar_w);
-                                        let _ = session.create_tab(&shell, area);
-                                    // [?] button: columns help_x..help_x+5
-                                    } else if mouse.column >= help_x && mouse.column < help_x + 5 {
-                                        overlay = Overlay::Help;
-                                    } else if mouse.column >= brand_width {
-                                        // Tab click — compute which tab
-                                        let mut x = brand_width;
-                                        let max_tab_x = term_width.saturating_sub(right_section_width);
-                                        for (i, t) in session.tabs.iter().enumerate() {
-                                            let label = format!(" {}:{} ", i + 1, t.name);
-                                            let tab_w = label.len() as u16;
-                                            if x + tab_w > max_tab_x { break; }
-                                            if mouse.column >= x && mouse.column < x + tab_w {
-                                                // Clicked on this tab
-                                                session.active_tab = Some(t.id);
-                                                break;
-                                            }
-                                            x += tab_w + 1; // +1 for separator
+                                    match tab_bar_hover {
+                                        Some(TabBarHover::Plus) => {
+                                            let area = compute_pane_area(&terminal, show_tab_bar, show_status_bar, sidebar_w);
+                                            let _ = session.create_tab(&shell, area);
                                         }
+                                        Some(TabBarHover::Help) => {
+                                            overlay = Overlay::Help;
+                                        }
+                                        Some(TabBarHover::Tab(tab_index)) => {
+                                            if let Some(tab) = session.tabs.get(tab_index) {
+                                                session.active_tab = Some(tab.id);
+                                            }
+                                        }
+                                        None => {}
                                     }
                                 }
                                 continue;
@@ -1018,7 +1101,42 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                             + (mouse.row - header_offset) as usize;
                                         if clicked_idx < file_browser.entries.len() {
                                             file_browser.cursor = clicked_idx;
+                                            let now = Instant::now();
+                                            let is_double_click = file_browser_last_click
+                                                .map(|(last_idx, last_ts)| {
+                                                    last_idx == clicked_idx
+                                                        && now.duration_since(last_ts)
+                                                            <= Duration::from_millis(350)
+                                                })
+                                                .unwrap_or(false);
+
+                                            if is_double_click {
+                                                if file_browser.entries[clicked_idx].is_dir {
+                                                    file_browser.toggle_expand();
+                                                } else if let Some(path) = file_browser.selected_path() {
+                                                    let screen_area = compute_screen_area(
+                                                        &terminal,
+                                                        show_tab_bar,
+                                                        show_status_bar,
+                                                        sidebar_w,
+                                                    );
+                                                    open_file_in_editor(
+                                                        &path,
+                                                        screen_area,
+                                                        &mut editor_panes,
+                                                        &mut next_editor_id,
+                                                        &mut focus,
+                                                    );
+                                                }
+                                                file_browser_last_click = None;
+                                            } else {
+                                                file_browser_last_click = Some((clicked_idx, now));
+                                            }
+                                        } else {
+                                            file_browser_last_click = None;
                                         }
+                                    } else {
+                                        file_browser_last_click = None;
                                     }
                                 }
                                 continue;
@@ -1058,6 +1176,32 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
                                 let adj_col = mouse.column.saturating_sub(sidebar_w);
                                 let adj_row = mouse.row.saturating_sub(chrome_y);
+
+                                if let Some(tab) = session.active_tab() {
+                                    if let Some((orientation, boundary_index)) =
+                                        hit_split_boundary(tab, adj_col, adj_row)
+                                    {
+                                        split_resize_dragging = Some(SplitResizeDragState {
+                                            boundary_index,
+                                            orientation,
+                                            last_col: mouse.column,
+                                            last_row: mouse.row,
+                                        });
+                                        continue;
+                                    }
+                                }
+
+                                if let Some(tab) = session.active_tab_mut() {
+                                    if let Some(pane_id) = hit_tiled_title_bar(tab, adj_col, adj_row) {
+                                        tiled_reorder_dragging = Some(TiledReorderDragState { pane_id });
+                                        for pane in &mut tab.panes {
+                                            pane.focused = pane.id == pane_id;
+                                        }
+                                        tab.active_pane = Some(pane_id);
+                                        continue;
+                                    }
+                                }
+
                                 if let Some(tab) = session.active_tab_mut() {
                                     let mut drag_started = false;
                                     // Iterate floating panes in reverse (topmost first visually)
@@ -1131,6 +1275,75 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
     io::stdout().execute(LeaveAlternateScreen)?;
     tracing::info!("uterx exited");
     Ok(())
+}
+
+fn build_initial_session(
+    shell: &str,
+    pane_area: MuxRect,
+    restore_on_launch: bool,
+) -> anyhow::Result<Session> {
+    if restore_on_launch {
+        let restore_path = Session::sessions_dir().join("main.toml");
+        if restore_path.exists() {
+            match Session::load_state(&restore_path)
+                .and_then(|state| Session::restore(&state, shell, pane_area))
+            {
+                Ok(session) if !session.tabs.is_empty() => {
+                    tracing::info!("restored session from {}", restore_path.display());
+                    return Ok(session);
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        "restored session was empty, starting fresh session"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to restore session from {}: {}",
+                        restore_path.display(),
+                        err
+                    );
+                }
+            }
+        }
+    }
+
+    let mut session = Session::new("main");
+    session.create_tab(shell, pane_area)?;
+    Ok(session)
+}
+
+fn normalize_focus_state(session: &mut Session) {
+    let active_tab_id = session.active_tab;
+    for tab in &mut session.tabs {
+        for pane in &mut tab.panes {
+            pane.focused = false;
+        }
+    }
+
+    if let Some(tab_id) = active_tab_id {
+        if let Some(tab) = session.tabs.iter_mut().find(|t| t.id == tab_id) {
+            let pane_id = tab.active_pane.or_else(|| tab.panes.first().map(|p| p.id));
+            tab.active_pane = pane_id;
+            if let Some(pid) = pane_id {
+                if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pid) {
+                    pane.focused = true;
+                    return;
+                }
+            }
+        }
+    }
+
+    if let Some(first_tab) = session.tabs.first_mut() {
+        let pane_id = first_tab.active_pane.or_else(|| first_tab.panes.first().map(|p| p.id));
+        first_tab.active_pane = pane_id;
+        session.active_tab = Some(first_tab.id);
+        if let Some(pid) = pane_id {
+            if let Some(pane) = first_tab.panes.iter_mut().find(|p| p.id == pid) {
+                pane.focused = true;
+            }
+        }
+    }
 }
 
 // ── Helper types and functions ──────────────────────────────────────────
@@ -1396,6 +1609,120 @@ fn key_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
         },
         _ => Vec::new(),
     }
+}
+
+/// Hit-test tiled split boundaries in pane-local coordinates.
+fn hit_split_boundary(
+    tab: &uterx_mux::tab::Tab,
+    mx: u16,
+    my: u16,
+) -> Option<(SplitResizeOrientation, usize)> {
+    const HIT_TOLERANCE: u16 = 1;
+
+    let tiled: Vec<_> = tab.panes.iter().filter(|p| !p.is_floating).collect();
+    if tiled.len() < 2 {
+        return None;
+    }
+
+    match &tab.layout {
+        MuxLayout::VerticalSplit { .. } => {
+            for i in 1..tiled.len() {
+                let boundary_x = tiled[i].rect.x;
+                let top = tiled[i].rect.y;
+                let bottom = tiled[i].rect.y + tiled[i].rect.height;
+                if my >= top && my < bottom && mx.abs_diff(boundary_x) <= HIT_TOLERANCE {
+                    return Some((SplitResizeOrientation::Vertical, i - 1));
+                }
+            }
+            None
+        }
+        MuxLayout::HorizontalSplit { .. } => {
+            for i in 1..tiled.len() {
+                let boundary_y = tiled[i].rect.y;
+                let left = tiled[i].rect.x;
+                let right = tiled[i].rect.x + tiled[i].rect.width;
+                if mx >= left && mx < right && my.abs_diff(boundary_y) <= HIT_TOLERANCE {
+                    return Some((SplitResizeOrientation::Horizontal, i - 1));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn tab_bar_hover_at(column: u16, term_width: u16, session: &Session) -> Option<TabBarHover> {
+    let brand_width: u16 = 8; // " uterx │"
+    let right_section_width: u16 = 12;
+    let plus_x = term_width.saturating_sub(right_section_width);
+    let help_x = plus_x + 5;
+
+    if column >= plus_x && column < plus_x + 5 {
+        return Some(TabBarHover::Plus);
+    }
+    if column >= help_x && column < help_x + 5 {
+        return Some(TabBarHover::Help);
+    }
+    if column < brand_width {
+        return None;
+    }
+
+    let mut x = brand_width;
+    let max_tab_x = term_width.saturating_sub(right_section_width);
+    for (i, t) in session.tabs.iter().enumerate() {
+        let display_name = if let Some(pane) = t.focused_pane() {
+            if pane.grid.title.is_empty() {
+                t.name.clone()
+            } else {
+                pane.grid.title.clone()
+            }
+        } else {
+            t.name.clone()
+        };
+        let label = format!(" {}:{} ", i + 1, display_name);
+        let tab_w = label.len() as u16;
+        if x + tab_w > max_tab_x {
+            break;
+        }
+        if column >= x && column < x + tab_w {
+            return Some(TabBarHover::Tab(i));
+        }
+        x += tab_w + 1;
+    }
+    None
+}
+
+fn hit_tiled_title_bar(
+    tab: &uterx_mux::tab::Tab,
+    mx: u16,
+    my: u16,
+) -> Option<uterx_mux::PaneId> {
+    let tiled_count = tab.panes.iter().filter(|p| !p.is_floating).count();
+    if tiled_count < 2 {
+        return None;
+    }
+
+    for pane in tab.panes.iter().filter(|p| !p.is_floating) {
+        let r = pane.rect;
+        if my == r.y && mx >= r.x && mx < r.x + r.width {
+            return Some(pane.id);
+        }
+    }
+    None
+}
+
+fn hit_tiled_pane(
+    tab: &uterx_mux::tab::Tab,
+    mx: u16,
+    my: u16,
+) -> Option<uterx_mux::PaneId> {
+    for pane in tab.panes.iter().filter(|p| !p.is_floating) {
+        let r = pane.rect;
+        if mx >= r.x && mx < r.x + r.width && my >= r.y && my < r.y + r.height {
+            return Some(pane.id);
+        }
+    }
+    None
 }
 
 /// Handle a mouse event — focus pane on click, scroll wheel.

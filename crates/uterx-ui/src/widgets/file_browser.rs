@@ -462,11 +462,21 @@ fn file_icon(entry: &FsEntry) -> &'static str {
 pub struct FileBrowserWidget<'a> {
     state: &'a FileBrowserState,
     focused: bool,
+    hovered_entry: Option<usize>,
 }
 
 impl<'a> FileBrowserWidget<'a> {
     pub fn new(state: &'a FileBrowserState, focused: bool) -> Self {
-        Self { state, focused }
+        Self {
+            state,
+            focused,
+            hovered_entry: None,
+        }
+    }
+
+    pub fn hovered_entry(mut self, hovered_entry: Option<usize>) -> Self {
+        self.hovered_entry = hovered_entry;
+        self
     }
 }
 
@@ -488,6 +498,7 @@ impl<'a> Widget for FileBrowserWidget<'a> {
         let green = Color::Rgb(166, 227, 161);    // Catppuccin green
         let yellow = Color::Rgb(249, 226, 175);   // Catppuccin yellow (search match)
         let red = Color::Rgb(243, 139, 168);      // Catppuccin red
+        let hover_bg = Color::Rgb(49, 50, 68);    // Catppuccin surface0
         // Search bar occupies the last row when search is active
         let search_row_reserved: u16 = if self.state.search_mode { 1 } else { 0 };
 
@@ -559,8 +570,15 @@ impl<'a> Widget for FileBrowserWidget<'a> {
             }
 
             let is_cursor = abs_idx == self.state.cursor;
+            let is_hovered = self.hovered_entry == Some(abs_idx);
 
-            let row_bg = if is_cursor { cursor_bg } else { bg };
+            let row_bg = if is_cursor {
+                cursor_bg
+            } else if is_hovered {
+                hover_bg
+            } else {
+                bg
+            };
             let row_style = Style::default().bg(row_bg);
 
             // Clear row

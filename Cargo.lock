@@ -3050,6 +3050,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fontdue",
+ "raw-window-handle",
  "tracing",
  "uterx-core",
  "wgpu",

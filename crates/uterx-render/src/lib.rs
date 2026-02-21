@@ -4,6 +4,10 @@
 //! including glyph rasterization, atlas management, and damage tracking.
 
 pub mod atlas;
+pub mod render_thread;
 pub mod renderer;
 
-pub use renderer::Renderer;
+pub use render_thread::{RenderThreadHandle, RenderThreadStats};
+pub use renderer::{
+	CursorInstance, CursorStyle, GpuState, Renderer, RendererConfig, SurfaceState,
+};

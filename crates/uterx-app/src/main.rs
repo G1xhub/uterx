@@ -14,6 +14,10 @@ struct Cli {
     #[arg(short, long)]
     config: Option<String>,
 
+    /// Disable automatic session restore on launch
+    #[arg(long = "no-restore")]
+    no_restore: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -74,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the terminal UI
     tracing::info!("starting uterx terminal desktop");
-    event_loop::run(cfg).await
+    event_loop::run(cfg, !cli.no_restore).await
 }
 
 fn handle_plugin_command(

@@ -246,6 +246,135 @@ impl Tab {
             pane.rect.y = y;
         }
     }
+
+    /// Reorder tiled panes by moving `dragged` to `target` index position.
+    /// Returns true if pane order changed.
+    pub fn reorder_tiled_panes(&mut self, dragged: PaneId, target: PaneId) -> bool {
+        if dragged == target {
+            return false;
+        }
+
+        let dragged_idx = match self
+            .panes
+            .iter()
+            .position(|p| p.id == dragged && !p.is_floating)
+        {
+            Some(idx) => idx,
+            None => return false,
+        };
+
+        let target_idx = match self
+            .panes
+            .iter()
+            .position(|p| p.id == target && !p.is_floating)
+        {
+            Some(idx) => idx,
+            None => return false,
+        };
+
+        let pane = self.panes.remove(dragged_idx);
+        let insert_idx = if dragged_idx < target_idx {
+            target_idx.saturating_sub(1)
+        } else {
+            target_idx
+        };
+        self.panes.insert(insert_idx, pane);
+        true
+    }
+
+    /// Adjust one split boundary by `delta_cells` (positive expands left/top side).
+    ///
+    /// Returns true if ratios were changed.
+    pub fn adjust_split_boundary(
+        &mut self,
+        area: Rect,
+        boundary_index: usize,
+        delta_cells: i16,
+        min_width: u16,
+        min_height: u16,
+    ) -> bool {
+        if delta_cells == 0 {
+            return false;
+        }
+
+        let tiled_count = self.panes.iter().filter(|p| !p.is_floating).count();
+        if tiled_count < 2 || boundary_index + 1 >= tiled_count {
+            return false;
+        }
+
+        let changed = match &mut self.layout {
+            Layout::VerticalSplit { ratios } => {
+                ensure_ratio_len(ratios, tiled_count);
+                adjust_adjacent_ratios(
+                    ratios,
+                    boundary_index,
+                    delta_cells,
+                    area.width,
+                    min_width,
+                )
+            }
+            Layout::HorizontalSplit { ratios } => {
+                ensure_ratio_len(ratios, tiled_count);
+                adjust_adjacent_ratios(
+                    ratios,
+                    boundary_index,
+                    delta_cells,
+                    area.height,
+                    min_height,
+                )
+            }
+            _ => false,
+        };
+
+        if changed {
+            self.relayout(area);
+        }
+
+        changed
+    }
+}
+
+fn ensure_ratio_len(ratios: &mut Vec<f32>, count: usize) {
+    if count == 0 {
+        ratios.clear();
+        return;
+    }
+    if ratios.len() != count {
+        *ratios = vec![1.0 / count as f32; count];
+    }
+}
+
+fn adjust_adjacent_ratios(
+    ratios: &mut [f32],
+    boundary_index: usize,
+    delta_cells: i16,
+    axis_len: u16,
+    min_cells: u16,
+) -> bool {
+    if axis_len == 0 || boundary_index + 1 >= ratios.len() {
+        return false;
+    }
+
+    let left = ratios[boundary_index];
+    let right = ratios[boundary_index + 1];
+    let pair_sum = left + right;
+
+    let min_ratio = min_cells as f32 / axis_len as f32;
+    if pair_sum < min_ratio * 2.0 {
+        return false;
+    }
+
+    let delta_ratio = delta_cells as f32 / axis_len as f32;
+    let new_left = (left + delta_ratio).clamp(min_ratio, pair_sum - min_ratio);
+    let new_right = pair_sum - new_left;
+
+    if (new_left - left).abs() < f32::EPSILON && (new_right - right).abs() < f32::EPSILON {
+        return false;
+    }
+
+    ratios[boundary_index] = new_left;
+    ratios[boundary_index + 1] = new_right;
+    true
 }
 
 #[cfg(test)]
@@ -346,5 +475,63 @@ mod tests {
         assert_eq!(tab.panes[0].rect.width, 50);
         assert_eq!(tab.panes[1].rect.width, 50);
         assert_eq!(tab.panes[0].rect.height, 30);
+    }
+
+    #[test]
+    fn test_adjust_vertical_split_boundary() {
+        let mut tab = Tab::new(TabId(1), "test".into());
+        tab.add_pane(Pane::new_bare(PaneId(1), make_rect()));
+        tab.add_pane(Pane::new_bare(PaneId(2), make_rect()));
+        tab.layout = Layout::VerticalSplit { ratios: vec![0.5, 0.5] };
+
+        let area = Rect { x: 0, y: 0, width: 100, height: 30 };
+        tab.relayout(area);
+
+        assert!(tab.adjust_split_boundary(area, 0, 10, 10, 4));
+        assert!(tab.panes[0].rect.width > tab.panes[1].rect.width);
+        assert!(tab.panes[0].rect.width >= 60);
+        assert!(tab.panes[1].rect.width <= 40);
+    }
+
+    #[test]
+    fn test_adjust_horizontal_split_boundary() {
+        let mut tab = Tab::new(TabId(1), "test".into());
+        tab.add_pane(Pane::new_bare(PaneId(1), make_rect()));
+        tab.add_pane(Pane::new_bare(PaneId(2), make_rect()));
+        tab.layout = Layout::HorizontalSplit { ratios: vec![0.5, 0.5] };
+
+        let area = Rect { x: 0, y: 0, width: 80, height: 40 };
+        tab.relayout(area);
+
+        assert!(tab.adjust_split_boundary(area, 0, -8, 10, 4));
+        assert_eq!(tab.panes[0].rect.height, 12);
+        assert_eq!(tab.panes[1].rect.height, 28);
+    }
+
+    #[test]
+    fn test_adjust_boundary_respects_minimum() {
+        let mut tab = Tab::new(TabId(1), "test".into());
+        tab.add_pane(Pane::new_bare(PaneId(1), make_rect()));
+        tab.add_pane(Pane::new_bare(PaneId(2), make_rect()));
+        tab.layout = Layout::VerticalSplit { ratios: vec![0.5, 0.5] };
+
+        let area = Rect { x: 0, y: 0, width: 50, height: 20 };
+        tab.relayout(area);
+
+        assert!(tab.adjust_split_boundary(area, 0, -100, 10, 4));
+        assert!(tab.panes[0].rect.width >= 10);
+        assert!(tab.panes[1].rect.width >= 10);
+    }
+
+    #[test]
+    fn test_reorder_tiled_panes() {
+        let mut tab = Tab::new(TabId(1), "test".into());
+        tab.add_pane(Pane::new_bare(PaneId(1), make_rect()));
+        tab.add_pane(Pane::new_bare(PaneId(2), make_rect()));
+        tab.add_pane(Pane::new_bare(PaneId(3), make_rect()));
+
+        assert!(tab.reorder_tiled_panes(PaneId(1), PaneId(3)));
+        let ids: Vec<u64> = tab.panes.iter().map(|p| p.id.0).collect();
+        assert_eq!(ids, vec![2, 1, 3]);
     }
 }

@@ -9,5 +9,6 @@ license.workspace = true
 uterx-core = { workspace = true }
 wgpu = { workspace = true }
 fontdue = { workspace = true }
+raw-window-handle = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }

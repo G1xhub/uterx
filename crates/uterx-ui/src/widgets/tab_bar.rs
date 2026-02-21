@@ -14,12 +14,20 @@ pub struct TabInfo {
     pub index: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabBarHover {
+    Tab(usize),
+    Plus,
+    Help,
+}
+
 /// Renders a horizontal tab bar with branding and controls.
 ///
 /// Layout: `⚡uterx │ 1:Tab1 │ 2:Tab2 │ ...            [+] [?]`
 pub struct TabBar<'a> {
     tabs: &'a [TabInfo],
     pub broadcast: bool,
+    hover: Option<TabBarHover>,
 }
 
 impl<'a> TabBar<'a> {
@@ -27,11 +35,17 @@ impl<'a> TabBar<'a> {
         Self {
             tabs,
             broadcast: false,
+            hover: None,
         }
     }
 
     pub fn broadcast(mut self, b: bool) -> Self {
         self.broadcast = b;
+        self
+    }
+
+    pub fn hover(mut self, hover: Option<TabBarHover>) -> Self {
+        self.hover = hover;
         self
     }
 }
@@ -74,15 +88,31 @@ impl<'a> Widget for TabBar<'a> {
                 break;
             }
 
+            let hovered = self.hover == Some(TabBarHover::Tab(tab.index));
+
             let style = if tab.active {
                 Style::default()
                     .fg(Color::Rgb(205, 214, 244)) // Catppuccin text
-                    .bg(Color::Rgb(49, 50, 68))    // Catppuccin surface0
+                    .bg(if hovered {
+                        Color::Rgb(69, 71, 90) // surface1
+                    } else {
+                        Color::Rgb(49, 50, 68) // surface0
+                    })
                     .add_modifier(Modifier::BOLD)
+                    .add_modifier(if hovered { Modifier::UNDERLINED } else { Modifier::empty() })
             } else {
                 Style::default()
-                    .fg(Color::Rgb(108, 112, 134)) // Catppuccin overlay0
-                    .bg(Color::Rgb(30, 30, 46))    // Catppuccin base
+                    .fg(if hovered {
+                        Color::Rgb(205, 214, 244) // text
+                    } else {
+                        Color::Rgb(108, 112, 134) // overlay0
+                    })
+                    .bg(if hovered {
+                        Color::Rgb(49, 50, 68) // surface0
+                    } else {
+                        Color::Rgb(30, 30, 46) // base
+                    })
+                    .add_modifier(if hovered { Modifier::BOLD } else { Modifier::empty() })
             };
 
             buf.set_string(x, area.y, &label, style);
@@ -108,15 +138,27 @@ impl<'a> Widget for TabBar<'a> {
         }
 
         // [+] New tab button
+        let plus_hovered = self.hover == Some(TabBarHover::Plus);
         let plus_style = Style::default()
             .fg(Color::Rgb(166, 227, 161)) // Catppuccin green
-            .bg(Color::Rgb(30, 30, 46));
+            .bg(if plus_hovered {
+                Color::Rgb(49, 50, 68)
+            } else {
+                Color::Rgb(30, 30, 46)
+            })
+            .add_modifier(if plus_hovered { Modifier::BOLD } else { Modifier::empty() });
         buf.set_string(right_x, area.y, " [+] ", plus_style);
 
         // [?] Help button
+        let help_hovered = self.hover == Some(TabBarHover::Help);
         let help_style = Style::default()
             .fg(Color::Rgb(180, 190, 254)) // Catppuccin lavender
-            .bg(Color::Rgb(30, 30, 46));
+            .bg(if help_hovered {
+                Color::Rgb(49, 50, 68)
+            } else {
+                Color::Rgb(30, 30, 46)
+            })
+            .add_modifier(if help_hovered { Modifier::BOLD } else { Modifier::empty() });
         buf.set_string(right_x + 5, area.y, " [?] ", help_style);
     }
 }
