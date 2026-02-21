@@ -9,5 +9,6 @@ pub mod renderer;
 
 pub use render_thread::{RenderThreadHandle, RenderThreadStats};
 pub use renderer::{
-	CursorInstance, CursorStyle, GpuState, Renderer, RendererConfig, SurfaceState,
+	CursorInstance, CursorStyle, GpuState, Renderer, RendererConfig, SelectionInstance,
+	SelectionRange, SurfaceState,
 };

@@ -190,10 +190,10 @@ uterx/
 - [x] Render pipeline skeleton (WGSL shader + bind group + draw-call encoder)
 - [x] Damage tracking (dirty cells/rows; only changed-cell geometry rebuild)
 - [x] Dedicated render thread with channel-based updates
-- [ ] Ligature rendering
+- [x] Ligature rendering
 - [x] Cursor rendering (block, bar, underline styles)
-- [ ] Selection highlighting
-- [ ] Smooth scrolling
+- [x] Selection highlighting
+- [x] Smooth scrolling
 
 ### Phase 4 — Plugin System (~30% scaffolding done)
 - [x] `PluginManifest` schema + TOML loading
@@ -364,6 +364,9 @@ Build plugins in priority order:
 | 2026-02-21 | Phase 3 | **Dedicated Render Thread** | Added `render_thread` module with channel-based command loop (`UpdateGrid`, `Flush`, `Shutdown`) running on a dedicated thread. The thread owns a renderer instance, processes incoming grid snapshots, and tracks frame statistics (`frames_processed`, instance count, changed cells). Exposed `RenderThreadHandle` API (`start`, `send_grid`, `flush`, `stats`, `shutdown`) and re-exported from render crate. Added unit test for processing multiple updates. `cargo test -p uterx-render` now 8 tests passing. |
 | 2026-02-21 | Phase 3 | **Cursor Rendering Styles** | Added explicit cursor rendering primitives in renderer with `CursorStyle` (`Block`, `Bar`, `Underline`) and `CursorInstance` geometry included in `FrameGeometry`. `RendererConfig` now carries cursor style; geometry builder emits cursor quad with style-specific dimensions/placement. Damage tracking now considers cursor movement by marking old/new cursor cells dirty so cursor-only movement can trigger targeted updates. Exported cursor types from render crate API. `cargo test -p uterx-render` now 9 tests passing; workspace `cargo check` passes. |
 | 2026-02-21 | Phase 3 | **Surface/Window Presentation Path** | Added surface integration APIs in renderer: unsafe window-handle based `try_init_surface_from_window`, capability-driven `configure_surface`, and `render_to_surface` with robust frame acquisition handling (`Lost/Outdated` reconfigure, `Timeout` skip, `OutOfMemory` error). Added `SurfaceState` and format/present/alpha selection helpers with tests. Render crate now supports full configure+present path while remaining app-window-framework agnostic. `cargo test -p uterx-render` now 10 tests passing; `cargo check -p uterx-render` passes cleanly. |
+| 2026-02-21 | Phase 3 | **Selection Highlighting** | Added selection support in renderer via `SelectionRange` and `SelectionInstance`, including overlay geometry generation in both full-frame and damage paths. Renderer now tracks current/previous selection state and triggers full redraw when selection changes to keep highlight transitions correct. Added selection tests (overlay instance generation and selection-change damage behavior). Exported selection types from render crate API. `cargo test -p uterx-render` now 12 tests passing; workspace `cargo check` passes (with pre-existing warnings in other crates). |
+| 2026-02-21 | Phase 3 | **Ligature Rendering** | Added ligature-aware geometry building in renderer using pattern-based run detection (e.g. `->`, `=>`, `==`, `!=`) with row-level grouping into single `CellInstance` spans. `CellInstance` now carries source `text`, and ligature runs are flagged for downstream glyph/atlas handling. Damage geometry now rebuilds full changed rows when ligatures are present to avoid partial-run artifacts. Added ligature tests for full-frame grouping and damage-path behavior. `cargo test -p uterx-render` now 14 tests passing; workspace `cargo check` passes (with pre-existing warnings in other crates). |
+| 2026-02-21 | Phase 3 | **Smooth Scrolling** | Added smooth scrolling state to renderer (`scroll_offset_px`, `scroll_target_px`) with interpolation step (`tick_smooth_scroll`) controlled by `RendererConfig::scroll_smoothing_factor`. Geometry generation now applies scroll offset to cell, ligature, selection, and cursor Y positions via a shared row-offset helper. Damage tracking marks full redraw when scroll offset changes to keep animation frames visually consistent. Added tests for offset application and scroll-change damage behavior. `cargo test -p uterx-render` now 16 tests passing; workspace `cargo check` passes (with pre-existing warnings in other crates). |
 | 2026-02-21 | Phase 7 | **Feature Brainstorming** | 10 innovative new features designed: Smart Workspace Manager, Pane Snippets & Templates, Real-time Process Monitor, Intelligent Search Across Panes, Pane History & Replay, Collaborative Editing, Keyboard Macro System, Integrated Git Graph, Task Runner & Dashboard, Smart Notifications & Alerts. Top 3 recommendations prioritized for performance and innovation. |
 
 ---

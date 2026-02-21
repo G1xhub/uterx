@@ -1,5 +1,7 @@
 //! wgpu-based terminal renderer.
 
+use std::collections::HashSet;
+
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use uterx_core::{Grid, cell::Color as CoreColor};
 
@@ -35,6 +37,18 @@ fn fs_main() -> @location(0) vec4<f32> {
 }
 "#;
 
+const LIGATURE_PATTERNS: [&str; 15] = [
+    "<==>", "<=>", "==>", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "::",
+    "++", "--", "..",
+];
+
+const FLAG_BOLD: u32 = 1 << 0;
+const FLAG_ITALIC: u32 = 1 << 1;
+const FLAG_UNDERLINE: u32 = 1 << 2;
+const FLAG_STRIKETHROUGH: u32 = 1 << 3;
+const FLAG_HIDDEN: u32 = 1 << 4;
+const FLAG_LIGATURE: u32 = 1 << 5;
+
 /// Runtime GPU state (headless for now; no surface binding yet).
 pub struct GpuState {
     pub instance: wgpu::Instance,
@@ -66,6 +80,7 @@ pub struct CellInstance {
     pub fg: [f32; 4],
     pub bg: [f32; 4],
     pub codepoint: u32,
+    pub text: String,
     pub flags: u32,
 }
 
@@ -84,10 +99,67 @@ pub struct CursorInstance {
     pub style: CursorStyle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionRange {
+    pub start_row: usize,
+    pub start_col: usize,
+    pub end_row: usize,
+    pub end_col: usize,
+}
+
+impl SelectionRange {
+    pub fn new(start_row: usize, start_col: usize, end_row: usize, end_col: usize) -> Self {
+        Self {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        }
+    }
+
+    fn normalized(self) -> Self {
+        if (self.start_row, self.start_col) <= (self.end_row, self.end_col) {
+            self
+        } else {
+            Self {
+                start_row: self.end_row,
+                start_col: self.end_col,
+                end_row: self.start_row,
+                end_col: self.start_col,
+            }
+        }
+    }
+
+    fn contains(self, row: usize, col: usize) -> bool {
+        let n = self.normalized();
+        if row < n.start_row || row > n.end_row {
+            return false;
+        }
+        if n.start_row == n.end_row {
+            return row == n.start_row && col >= n.start_col && col <= n.end_col;
+        }
+        if row == n.start_row {
+            return col >= n.start_col;
+        }
+        if row == n.end_row {
+            return col <= n.end_col;
+        }
+        true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectionInstance {
+    pub pos: [f32; 2],
+    pub size: [f32; 2],
+    pub color: [f32; 4],
+}
+
 /// Geometry generated for a single frame from terminal grid state.
 #[derive(Debug, Clone, Default)]
 pub struct FrameGeometry {
     pub instances: Vec<CellInstance>,
+    pub selections: Vec<SelectionInstance>,
     pub cursor: Option<CursorInstance>,
     pub cols: usize,
     pub rows: usize,
@@ -114,6 +186,8 @@ pub struct RendererConfig {
     pub cell_width: f32,
     pub cell_height: f32,
     pub cursor_style: CursorStyle,
+    pub selection_color: [f32; 4],
+    pub scroll_smoothing_factor: f32,
 }
 
 impl Default for RendererConfig {
@@ -123,6 +197,8 @@ impl Default for RendererConfig {
             cell_width: 8.0,
             cell_height: 16.0,
             cursor_style: CursorStyle::Block,
+            selection_color: [137.0 / 255.0, 180.0 / 255.0, 250.0 / 255.0, 0.35],
+            scroll_smoothing_factor: 0.22,
         }
     }
 }
@@ -139,6 +215,11 @@ pub struct Renderer {
     previous_cols: usize,
     previous_rows: usize,
     previous_cursor: Option<(usize, usize)>,
+    selection: Option<SelectionRange>,
+    previous_selection: Option<SelectionRange>,
+    scroll_offset_px: f32,
+    scroll_target_px: f32,
+    previous_scroll_offset_px: f32,
 }
 
 impl Renderer {
@@ -157,7 +238,56 @@ impl Renderer {
             previous_cols: 0,
             previous_rows: 0,
             previous_cursor: None,
+            selection: None,
+            previous_selection: None,
+            scroll_offset_px: 0.0,
+            scroll_target_px: 0.0,
+            previous_scroll_offset_px: 0.0,
         }
+    }
+
+    pub fn set_selection(&mut self, selection: SelectionRange) {
+        self.selection = Some(selection.normalized());
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    pub fn selection(&self) -> Option<SelectionRange> {
+        self.selection
+    }
+
+    pub fn scroll_offset_px(&self) -> f32 {
+        self.scroll_offset_px
+    }
+
+    pub fn scroll_target_px(&self) -> f32 {
+        self.scroll_target_px
+    }
+
+    pub fn set_scroll_offset_px(&mut self, offset_px: f32) {
+        self.scroll_offset_px = offset_px;
+        self.scroll_target_px = offset_px;
+    }
+
+    pub fn set_scroll_target_px(&mut self, target_px: f32) {
+        self.scroll_target_px = target_px;
+    }
+
+    pub fn tick_smooth_scroll(&mut self) -> bool {
+        let diff = self.scroll_target_px - self.scroll_offset_px;
+        if diff.abs() <= 0.01 {
+            self.scroll_offset_px = self.scroll_target_px;
+            return false;
+        }
+
+        let factor = self.config.scroll_smoothing_factor.clamp(0.05, 1.0);
+        self.scroll_offset_px += diff * factor;
+        if (self.scroll_target_px - self.scroll_offset_px).abs() <= 0.01 {
+            self.scroll_offset_px = self.scroll_target_px;
+        }
+        true
     }
 
     /// Initialize wgpu in headless mode (no surface/window binding yet).
@@ -216,6 +346,7 @@ impl Renderer {
     /// 3. Build vertex buffers
     /// 4. Submit a wgpu render pass
     pub fn render(&mut self, grid: &Grid) {
+        self.tick_smooth_scroll();
         let damage = self.compute_damage(grid);
         let geometry = if damage.full_redraw {
             self.build_frame_geometry(grid)
@@ -553,60 +684,12 @@ impl Renderer {
         let mut instances = Vec::with_capacity(cols.saturating_mul(rows));
 
         for row in 0..rows {
-            for col in 0..cols {
-                let Some(cell) = grid.cell(row, col) else {
-                    continue;
-                };
-
-                let mut fg = cell.attrs.fg;
-                let mut bg = cell.attrs.bg;
-                if cell.attrs.inverse {
-                    std::mem::swap(&mut fg, &mut bg);
-                }
-
-                let codepoint = if cell.attrs.hidden {
-                    ' ' as u32
-                } else {
-                    cell.content.chars().next().unwrap_or(' ') as u32
-                };
-
-                let mut flags = 0u32;
-                if cell.attrs.bold {
-                    flags |= 1 << 0;
-                }
-                if cell.attrs.italic {
-                    flags |= 1 << 1;
-                }
-                if cell.attrs.underline {
-                    flags |= 1 << 2;
-                }
-                if cell.attrs.strikethrough {
-                    flags |= 1 << 3;
-                }
-                if cell.attrs.hidden {
-                    flags |= 1 << 4;
-                }
-
-                let width_cols = cell.width.max(1) as f32;
-                instances.push(CellInstance {
-                    pos: [
-                        col as f32 * self.config.cell_width,
-                        row as f32 * self.config.cell_height,
-                    ],
-                    size: [
-                        self.config.cell_width * width_cols,
-                        self.config.cell_height,
-                    ],
-                    fg: resolve_color(fg, true),
-                    bg: resolve_color(bg, false),
-                    codepoint,
-                    flags,
-                });
-            }
+            instances.extend(self.build_row_instances(grid, row));
         }
 
         FrameGeometry {
             instances,
+            selections: self.build_selection_instances(grid, None),
             cursor: self.build_cursor_instance(grid),
             cols,
             rows,
@@ -621,10 +704,49 @@ impl Renderer {
             || self.previous_rows != rows;
 
         let snapshots = snapshot_grid_cells(grid);
+        let selection_changed = self.selection != self.previous_selection;
+        let scroll_changed =
+            (self.scroll_offset_px - self.previous_scroll_offset_px).abs() > 0.01;
         if size_changed {
             self.previous_cells = Some(snapshots);
             self.previous_cols = cols;
             self.previous_rows = rows;
+            self.previous_selection = self.selection;
+            self.previous_scroll_offset_px = self.scroll_offset_px;
+            return DamageReport {
+                full_redraw: true,
+                changed_cells: Vec::new(),
+                changed_rows: (0..rows).collect(),
+            };
+        }
+
+        if selection_changed {
+            self.previous_cells = Some(snapshots);
+            self.previous_cols = cols;
+            self.previous_rows = rows;
+            self.previous_selection = self.selection;
+            self.previous_scroll_offset_px = self.scroll_offset_px;
+            self.previous_cursor = Some((
+                grid.cursor_row.min(rows.saturating_sub(1)),
+                grid.cursor_col.min(cols.saturating_sub(1)),
+            ));
+            return DamageReport {
+                full_redraw: true,
+                changed_cells: Vec::new(),
+                changed_rows: (0..rows).collect(),
+            };
+        }
+
+        if scroll_changed {
+            self.previous_cells = Some(snapshots);
+            self.previous_cols = cols;
+            self.previous_rows = rows;
+            self.previous_selection = self.selection;
+            self.previous_scroll_offset_px = self.scroll_offset_px;
+            self.previous_cursor = Some((
+                grid.cursor_row.min(rows.saturating_sub(1)),
+                grid.cursor_col.min(cols.saturating_sub(1)),
+            ));
             return DamageReport {
                 full_redraw: true,
                 changed_cells: Vec::new(),
@@ -638,6 +760,7 @@ impl Renderer {
                 self.previous_cells = Some(snapshots);
                 self.previous_cols = cols;
                 self.previous_rows = rows;
+                self.previous_scroll_offset_px = self.scroll_offset_px;
                 return DamageReport {
                     full_redraw: true,
                     changed_cells: Vec::new(),
@@ -685,6 +808,8 @@ impl Renderer {
         self.previous_cols = cols;
         self.previous_rows = rows;
         self.previous_cursor = Some(current_cursor);
+        self.previous_selection = self.selection;
+        self.previous_scroll_offset_px = self.scroll_offset_px;
 
         DamageReport {
             full_redraw: false,
@@ -698,8 +823,25 @@ impl Renderer {
             return self.build_frame_geometry(grid);
         }
 
-        let mut instances = Vec::with_capacity(damage.changed_cells.len());
+        let mut instances = Vec::new();
+        let mut consumed = HashSet::new();
+
+        for row in &damage.changed_rows {
+            if *row >= grid.rows() {
+                continue;
+            }
+            if self.row_contains_ligature(grid, *row) {
+                instances.extend(self.build_row_instances(grid, *row));
+                for col in 0..grid.cols() {
+                    consumed.insert((*row, col));
+                }
+            }
+        }
+
         for (row, col) in &damage.changed_cells {
+            if consumed.contains(&(*row, *col)) {
+                continue;
+            }
             let Some(cell) = grid.cell(*row, *col) else {
                 continue;
             };
@@ -708,6 +850,7 @@ impl Renderer {
 
         FrameGeometry {
             instances,
+            selections: self.build_selection_instances(grid, Some(damage)),
             cursor: self.build_cursor_instance(grid),
             cols: grid.cols(),
             rows: grid.rows(),
@@ -731,29 +874,19 @@ impl Renderer {
         } else {
             cell.content.chars().next().unwrap_or(' ') as u32
         };
+        let text = if cell.attrs.hidden {
+            " ".to_string()
+        } else {
+            cell.content.clone()
+        };
 
-        let mut flags = 0u32;
-        if cell.attrs.bold {
-            flags |= 1 << 0;
-        }
-        if cell.attrs.italic {
-            flags |= 1 << 1;
-        }
-        if cell.attrs.underline {
-            flags |= 1 << 2;
-        }
-        if cell.attrs.strikethrough {
-            flags |= 1 << 3;
-        }
-        if cell.attrs.hidden {
-            flags |= 1 << 4;
-        }
+        let flags = cell_style_flags(cell);
 
         let width_cols = cell.width.max(1) as f32;
         CellInstance {
             pos: [
                 col as f32 * self.config.cell_width,
-                row as f32 * self.config.cell_height,
+                self.row_y(row),
             ],
             size: [
                 self.config.cell_width * width_cols,
@@ -762,8 +895,118 @@ impl Renderer {
             fg: resolve_color(fg, true),
             bg: resolve_color(bg, false),
             codepoint,
+            text,
             flags,
         }
+    }
+
+    fn build_row_instances(&self, grid: &Grid, row: usize) -> Vec<CellInstance> {
+        let cols = grid.cols();
+        let mut out = Vec::with_capacity(cols);
+        let mut col = 0usize;
+
+        while col < cols {
+            if let Some((pattern, len)) = self.match_ligature_at(grid, row, col) {
+                if let Some(instance) = self.build_ligature_instance(grid, row, col, pattern, len) {
+                    out.push(instance);
+                    col += len;
+                    continue;
+                }
+            }
+
+            if let Some(cell) = grid.cell(row, col) {
+                out.push(self.build_cell_instance(row, col, cell));
+            }
+            col += 1;
+        }
+
+        out
+    }
+
+    fn row_contains_ligature(&self, grid: &Grid, row: usize) -> bool {
+        let cols = grid.cols();
+        for col in 0..cols {
+            if self.match_ligature_at(grid, row, col).is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn match_ligature_at(&self, grid: &Grid, row: usize, start_col: usize) -> Option<(&'static str, usize)> {
+        let cols = grid.cols();
+        if start_col >= cols {
+            return None;
+        }
+
+        for pattern in LIGATURE_PATTERNS {
+            let len = pattern.chars().count();
+            if start_col + len > cols {
+                continue;
+            }
+            if self.cells_match_pattern(grid, row, start_col, pattern) {
+                return Some((pattern, len));
+            }
+        }
+        None
+    }
+
+    fn cells_match_pattern(&self, grid: &Grid, row: usize, start_col: usize, pattern: &str) -> bool {
+        let mut chars = pattern.chars();
+        let Some(first_cell) = grid.cell(row, start_col) else {
+            return false;
+        };
+        if first_cell.attrs.hidden || first_cell.width != 1 {
+            return false;
+        }
+        let base_attrs = first_cell.attrs;
+
+        for (offset, pattern_char) in chars.by_ref().enumerate() {
+            let col = start_col + offset;
+            let Some(cell) = grid.cell(row, col) else {
+                return false;
+            };
+            if cell.attrs.hidden || cell.width != 1 {
+                return false;
+            }
+            if cell.attrs != base_attrs {
+                return false;
+            }
+            if cell.content.chars().next().unwrap_or(' ') != pattern_char {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn build_ligature_instance(
+        &self,
+        grid: &Grid,
+        row: usize,
+        col: usize,
+        pattern: &str,
+        len: usize,
+    ) -> Option<CellInstance> {
+        let cell = grid.cell(row, col)?;
+        let mut fg = cell.attrs.fg;
+        let mut bg = cell.attrs.bg;
+        if cell.attrs.inverse {
+            std::mem::swap(&mut fg, &mut bg);
+        }
+
+        Some(CellInstance {
+            pos: [
+                col as f32 * self.config.cell_width,
+                self.row_y(row),
+            ],
+            size: [self.config.cell_width * len as f32, self.config.cell_height],
+            fg: resolve_color(fg, true),
+            bg: resolve_color(bg, false),
+            codepoint: pattern.chars().next().unwrap_or(' ') as u32,
+            text: pattern.to_string(),
+            flags: cell_style_flags(cell) | FLAG_LIGATURE,
+        })
     }
 
     fn build_cursor_instance(&self, grid: &Grid) -> Option<CursorInstance> {
@@ -774,7 +1017,7 @@ impl Renderer {
         let row = grid.cursor_row.min(grid.rows().saturating_sub(1));
         let col = grid.cursor_col.min(grid.cols().saturating_sub(1));
         let x = col as f32 * self.config.cell_width;
-        let y = row as f32 * self.config.cell_height;
+        let y = self.row_y(row);
 
         let (w, h) = match self.config.cursor_style {
             CursorStyle::Block => (self.config.cell_width, self.config.cell_height),
@@ -794,6 +1037,52 @@ impl Renderer {
             style: self.config.cursor_style,
         })
     }
+
+    fn build_selection_instances(
+        &self,
+        grid: &Grid,
+        damage: Option<&DamageReport>,
+    ) -> Vec<SelectionInstance> {
+        let Some(selection) = self.selection else {
+            return Vec::new();
+        };
+
+        let mut selections = Vec::new();
+        match damage {
+            Some(d) if !d.full_redraw => {
+                for (row, col) in &d.changed_cells {
+                    if selection.contains(*row, *col) {
+                        selections.push(self.selection_instance_at(*row, *col));
+                    }
+                }
+            }
+            _ => {
+                for row in 0..grid.rows() {
+                    for col in 0..grid.cols() {
+                        if selection.contains(row, col) {
+                            selections.push(self.selection_instance_at(row, col));
+                        }
+                    }
+                }
+            }
+        }
+        selections
+    }
+
+    fn selection_instance_at(&self, row: usize, col: usize) -> SelectionInstance {
+        SelectionInstance {
+            pos: [
+                col as f32 * self.config.cell_width,
+                self.row_y(row),
+            ],
+            size: [self.config.cell_width, self.config.cell_height],
+            color: self.config.selection_color,
+        }
+    }
+
+    fn row_y(&self, row: usize) -> f32 {
+        row as f32 * self.config.cell_height - self.scroll_offset_px
+    }
 }
 
 fn snapshot_grid_cells(grid: &Grid) -> Vec<CellSnapshot> {
@@ -810,6 +1099,26 @@ fn snapshot_grid_cells(grid: &Grid) -> Vec<CellSnapshot> {
         }
     }
     snapshots
+}
+
+fn cell_style_flags(cell: &uterx_core::Cell) -> u32 {
+    let mut flags = 0u32;
+    if cell.attrs.bold {
+        flags |= FLAG_BOLD;
+    }
+    if cell.attrs.italic {
+        flags |= FLAG_ITALIC;
+    }
+    if cell.attrs.underline {
+        flags |= FLAG_UNDERLINE;
+    }
+    if cell.attrs.strikethrough {
+        flags |= FLAG_STRIKETHROUGH;
+    }
+    if cell.attrs.hidden {
+        flags |= FLAG_HIDDEN;
+    }
+    flags
 }
 
 fn push_unique_cell(
@@ -963,7 +1272,9 @@ mod tests {
         assert_eq!(geom.cols, 2);
         assert_eq!(geom.rows, 2);
         assert_eq!(geom.instances.len(), 4);
+        assert!(geom.selections.is_empty());
         assert_eq!(geom.instances[0].codepoint, 'A' as u32);
+        assert_eq!(geom.instances[0].text, "A");
         assert!(geom.cursor.is_some());
     }
 
@@ -1020,7 +1331,9 @@ mod tests {
         let damage = renderer.compute_damage(&grid);
         let geom = renderer.build_damage_geometry(&grid, &damage);
         assert_eq!(geom.instances.len(), 1);
+        assert!(geom.selections.is_empty());
         assert_eq!(geom.instances[0].codepoint, 'Q' as u32);
+        assert_eq!(geom.instances[0].text, "Q");
         assert!(geom.cursor.is_some());
     }
 
@@ -1070,5 +1383,104 @@ mod tests {
         let cursor = geom.cursor.expect("cursor should exist");
         assert_eq!(cursor.style, CursorStyle::Bar);
         assert!(cursor.size[0] < renderer.config().cell_width);
+    }
+
+    #[test]
+    fn selection_adds_overlay_instances() {
+        let grid = Grid::new(4, 2);
+        let mut renderer = Renderer::new(RendererConfig::default());
+        renderer.set_selection(SelectionRange::new(0, 1, 0, 2));
+
+        let geom = renderer.build_frame_geometry(&grid);
+        assert_eq!(geom.selections.len(), 2);
+        assert_eq!(geom.selections[0].pos, [renderer.config().cell_width, 0.0]);
+    }
+
+    #[test]
+    fn selection_change_triggers_full_redraw_damage() {
+        let grid = Grid::new(3, 1);
+        let mut renderer = Renderer::new(RendererConfig::default());
+
+        let d0 = renderer.compute_damage(&grid);
+        assert!(d0.full_redraw);
+
+        let d1 = renderer.compute_damage(&grid);
+        assert!(!d1.full_redraw);
+
+        renderer.set_selection(SelectionRange::new(0, 0, 0, 1));
+        let d2 = renderer.compute_damage(&grid);
+        assert!(d2.full_redraw);
+    }
+
+    #[test]
+    fn ligature_run_is_grouped_into_single_instance() {
+        let mut grid = Grid::new(4, 1);
+        if let Some(cell) = grid.cell_mut(0, 0) {
+            cell.content = "-".to_string();
+        }
+        if let Some(cell) = grid.cell_mut(0, 1) {
+            cell.content = ">".to_string();
+        }
+        if let Some(cell) = grid.cell_mut(0, 2) {
+            cell.content = "X".to_string();
+        }
+
+        let renderer = Renderer::new(RendererConfig::default());
+        let geom = renderer.build_frame_geometry(&grid);
+
+        assert_eq!(geom.instances.len(), 3);
+        assert_eq!(geom.instances[0].text, "->");
+        assert_eq!(geom.instances[0].size[0], renderer.config().cell_width * 2.0);
+        assert_ne!(geom.instances[0].flags & FLAG_LIGATURE, 0);
+    }
+
+    #[test]
+    fn ligature_row_damage_rebuilds_row_geometry() {
+        let mut grid = Grid::new(3, 1);
+        let mut renderer = Renderer::new(RendererConfig::default());
+
+        let _ = renderer.compute_damage(&grid);
+        if let Some(cell) = grid.cell_mut(0, 0) {
+            cell.content = "-".to_string();
+        }
+        if let Some(cell) = grid.cell_mut(0, 1) {
+            cell.content = ">".to_string();
+        }
+
+        let damage = renderer.compute_damage(&grid);
+        let geom = renderer.build_damage_geometry(&grid, &damage);
+
+        assert_eq!(geom.instances.len(), 2);
+        assert_eq!(geom.instances[0].text, "->");
+    }
+
+    #[test]
+    fn smooth_scroll_offsets_instance_positions() {
+        let mut grid = Grid::new(1, 1);
+        if let Some(cell) = grid.cell_mut(0, 0) {
+            cell.content = "A".to_string();
+        }
+
+        let mut renderer = Renderer::new(RendererConfig::default());
+        renderer.set_scroll_offset_px(6.0);
+
+        let geom = renderer.build_frame_geometry(&grid);
+        assert_eq!(geom.instances[0].pos[1], -6.0);
+    }
+
+    #[test]
+    fn smooth_scroll_change_triggers_full_redraw_damage() {
+        let grid = Grid::new(2, 1);
+        let mut renderer = Renderer::new(RendererConfig::default());
+
+        let d0 = renderer.compute_damage(&grid);
+        assert!(d0.full_redraw);
+
+        let d1 = renderer.compute_damage(&grid);
+        assert!(!d1.full_redraw);
+
+        renderer.set_scroll_offset_px(8.0);
+        let d2 = renderer.compute_damage(&grid);
+        assert!(d2.full_redraw);
     }
 }
