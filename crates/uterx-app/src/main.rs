@@ -91,7 +91,11 @@ fn handle_plugin_command(
 
     match action {
         PluginAction::Add { source } => {
-            manager.install(&source)?;
+            let installed = manager.install(&source)?;
+            println!(
+                "Installed plugin: {} v{}",
+                installed.name, installed.version
+            );
         }
         PluginAction::Remove { name } => {
             manager.remove(&name)?;
@@ -113,10 +117,17 @@ fn handle_plugin_command(
             }
         }
         PluginAction::Update { name } => {
-            println!(
-                "Plugin update not yet implemented{}",
-                name.map(|n| format!(" for {}", n)).unwrap_or_default()
-            );
+            let report = manager.update(name.as_deref())?;
+            if report.updated.is_empty() && report.skipped.is_empty() {
+                println!("No plugins installed.");
+            } else {
+                for entry in report.updated {
+                    println!("Updated plugin: {}", entry);
+                }
+                for entry in report.skipped {
+                    println!("Skipped plugin: {}", entry);
+                }
+            }
         }
     }
     Ok(())

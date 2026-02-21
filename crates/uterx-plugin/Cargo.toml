@@ -12,3 +12,8 @@ toml = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+tempfile = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
