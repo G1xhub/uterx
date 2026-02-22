@@ -1534,6 +1534,63 @@ fn save_uterxai_settings(path: &Path, key: &str, url: &str, model: &str) -> anyh
     Ok(())
 }
 
+fn normalize_uterxai_setup_values(api_key: &str, api_url: &str, api_model: &str) -> (String, String, String) {
+    let key_text = api_key.trim().to_string();
+    let url_text = if api_url.trim().is_empty() {
+        "https://api.z.ai/v1/chat/completions".to_string()
+    } else {
+        api_url.trim().to_string()
+    };
+    let model_text = if api_model.trim().is_empty() {
+        "glm-4.5-air".to_string()
+    } else {
+        api_model.trim().to_string()
+    };
+    (key_text, url_text, model_text)
+}
+
+fn validate_uterxai_setup(api_key: &str, api_url: &str, api_model: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    if api_key.is_empty() {
+        errors.push("API key is required".to_string());
+    } else if api_key.chars().count() < 10 {
+        errors.push("API key seems too short".to_string());
+    }
+
+    if !(api_url.starts_with("http://") || api_url.starts_with("https://")) {
+        errors.push("API URL must start with http:// or https://".to_string());
+    }
+
+    if api_model.is_empty() {
+        errors.push("API model is required".to_string());
+    }
+
+    errors
+}
+
+fn uterxai_setup_field_hint(field: UterxAiSetupField) -> &'static str {
+    match field {
+        UterxAiSetupField::ApiKey => {
+            "Hint: Paste your z.ai API key (hidden in UI, stored in provider.toml)."
+        }
+        UterxAiSetupField::ApiUrl => {
+            "Hint: z.ai endpoint, e.g. https://api.z.ai/v1/chat/completions"
+        }
+        UterxAiSetupField::ApiModel => {
+            "Hint: Model name, e.g. glm-4.5-air"
+        }
+    }
+}
+
+fn uterxai_setup_field_label(field: UterxAiSetupField) -> &'static str {
+    match field {
+        UterxAiSetupField::ApiKey => "API Key",
+        UterxAiSetupField::ApiUrl => "API URL",
+        UterxAiSetupField::ApiModel => "API Model",
+    }
+}
+
 fn mask_secret(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1575,6 +1632,10 @@ fn render_uterxai_pane(session: &mut Session, runtime: &UterxAiRuntime) {
     if runtime.setup_mode {
         append_text_to_grid(&mut pane.grid, "Setup: configure provider.toml in-app");
         append_text_to_grid(&mut pane.grid, "Use Up/Down/Tab to move, Enter to continue/save.");
+        append_text_to_grid(
+            &mut pane.grid,
+            &format!("[editing {}]", uterxai_setup_field_label(runtime.setup_field)),
+        );
 
         let key_prefix = if runtime.setup_field == UterxAiSetupField::ApiKey {
             ">"
@@ -1604,6 +1665,28 @@ fn render_uterxai_pane(session: &mut Session, runtime: &UterxAiRuntime) {
             &mut pane.grid,
             &format!("{} API Model: {}", model_prefix, runtime.api_model),
         );
+        append_text_to_grid(
+            &mut pane.grid,
+            uterxai_setup_field_hint(runtime.setup_field),
+        );
+
+        let (key_text, url_text, model_text) = normalize_uterxai_setup_values(
+            &runtime.api_key,
+            &runtime.api_url,
+            &runtime.api_model,
+        );
+        let errors = validate_uterxai_setup(&key_text, &url_text, &model_text);
+        if errors.is_empty() {
+            append_text_to_grid(&mut pane.grid, "Validation: ✅ ready");
+        } else {
+            append_text_to_grid(
+                &mut pane.grid,
+                &format!("Validation: ❌ {} issue(s)", errors.len()),
+            );
+            for error in errors {
+                append_text_to_grid(&mut pane.grid, &format!(" - {}", error));
+            }
+        }
         return;
     }
 
@@ -1741,33 +1824,31 @@ fn handle_uterxai_prompt_key(
                 if runtime.setup_field != UterxAiSetupField::ApiModel {
                     runtime.setup_field = runtime.setup_field.next();
                 } else {
-                    let key_text = runtime.api_key.trim().to_string();
-                    let url_text = if runtime.api_url.trim().is_empty() {
-                        "https://api.z.ai/v1/chat/completions".to_string()
-                    } else {
-                        runtime.api_url.trim().to_string()
-                    };
-                    let model_text = if runtime.api_model.trim().is_empty() {
-                        "glm-4.5-air".to_string()
-                    } else {
-                        runtime.api_model.trim().to_string()
-                    };
+                    let (key_text, url_text, model_text) = normalize_uterxai_setup_values(
+                        &runtime.api_key,
+                        &runtime.api_url,
+                        &runtime.api_model,
+                    );
 
                     runtime.api_key = key_text.clone();
                     runtime.api_url = url_text.clone();
                     runtime.api_model = model_text.clone();
 
+                    let errors = validate_uterxai_setup(&key_text, &url_text, &model_text);
+                    if !errors.is_empty() {
+                        runtime.setup_mode = true;
+                        runtime.status = format!("UterxAI setup invalid: {}", errors[0]);
+                        render_uterxai_pane(session, runtime);
+                        return true;
+                    }
+
                     match runtime.settings_path.as_deref() {
                         Some(path) => {
                             match save_uterxai_settings(path, &key_text, &url_text, &model_text) {
                                 Ok(()) => {
-                                    runtime.setup_mode = key_text.is_empty();
-                                    if runtime.setup_mode {
-                                        runtime.status = "UterxAI setup incomplete: API key required".to_string();
-                                    } else {
-                                        runtime.status = "UterxAI setup saved".to_string();
-                                        runtime.transcript.push("UterxAI setup completed.".to_string());
-                                    }
+                                    runtime.setup_mode = false;
+                                    runtime.status = "UterxAI setup saved".to_string();
+                                    runtime.transcript.push("UterxAI setup completed.".to_string());
                                 }
                                 Err(err) => {
                                     runtime.status = format!("UterxAI setup save failed: {}", err);
