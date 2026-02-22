@@ -30,6 +30,7 @@ impl HelpOverlay {
                     ("F1", "Toggle this help screen"),
                     ("Ctrl+P", "Open command palette"),
                     ("Ctrl+E", "Toggle file browser sidebar"),
+                    ("Ctrl+Shift+A", "Open/focus UterxAI pane"),
                 ],
             },
             HelpSection {

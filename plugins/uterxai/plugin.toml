@@ -1,0 +1,7 @@
+name = "uterxai"
+version = "0.1.0"
+description = "UterxAI multi-provider assistant plugin"
+author = "uterx"
+wasm_module = "uterxai.wasm"
+entry_point = "_start"
+permissions = ["ui", "io", "network", "filesystem", "platform"]

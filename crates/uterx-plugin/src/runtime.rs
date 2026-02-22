@@ -36,8 +36,10 @@ pub struct IoWriteCall {
 
 #[derive(Debug, Clone)]
 pub struct NetHttpCall {
+    pub method: String,
     pub url: String,
     pub status: i32,
+    pub request_bytes: usize,
     pub bytes_written: usize,
 }
 
@@ -133,6 +135,14 @@ impl PluginInstance {
         Ok(())
     }
 
+    pub fn call_i32_func(&mut self, name: &str) -> anyhow::Result<i32> {
+        let func = self
+            .instance
+            .get_typed_func::<(), i32>(&mut self.store, name)?;
+        let out = func.call(&mut self.store, ())?;
+        Ok(out)
+    }
+
     pub fn set_pane_size(&mut self, pane_id: u64, width: u32, height: u32) {
         self.store
             .data_mut()
@@ -159,6 +169,10 @@ impl PluginInstance {
             .entry(stream_id)
             .or_default()
             .extend_from_slice(data);
+    }
+
+    pub fn push_ai_stream_chunk(&mut self, stream_id: u64, chunk: &[u8]) {
+        self.append_stream_input(stream_id, chunk);
     }
 
     pub fn stream_output(&self, stream_id: u64) -> Option<&[u8]> {
@@ -470,10 +484,88 @@ fn register_host_api(linker: &mut Linker<PluginState>) -> anyhow::Result<()> {
             }
 
             caller.data_mut().net_http_calls.push(NetHttpCall {
+                method: "GET".to_string(),
                 url,
                 status,
+                request_bytes: 0,
                 bytes_written: write_len,
             });
+            status
+        },
+    )?;
+
+    linker.func_wrap(
+        "uterx_net",
+        "http_post",
+        |mut caller: Caller<'_, PluginState>,
+         url_ptr: i32,
+         url_len: i32,
+         headers_ptr: i32,
+         headers_len: i32,
+         body_ptr: i32,
+         body_len: i32,
+         response_ptr: i32,
+         response_len: i32|
+         -> i32 {
+            if !resolve_permission_decision(caller.data_mut(), Permission::Network, "uterx_net.http_post") {
+                tracing::warn!(
+                    plugin = %caller.data().manifest.name,
+                    "blocked uterx_net.http_post (missing network permission)"
+                );
+                return -1;
+            }
+
+            let Some(url) = read_guest_string(&mut caller, url_ptr, url_len) else {
+                tracing::warn!(
+                    plugin = %caller.data().manifest.name,
+                    "failed to read url for uterx_net.http_post"
+                );
+                return -1;
+            };
+            let Some(headers_raw) = read_guest_string(&mut caller, headers_ptr, headers_len) else {
+                tracing::warn!(
+                    plugin = %caller.data().manifest.name,
+                    "failed to read headers for uterx_net.http_post"
+                );
+                return -1;
+            };
+            let Some(body) = read_guest_bytes(&mut caller, body_ptr, body_len) else {
+                tracing::warn!(
+                    plugin = %caller.data().manifest.name,
+                    "failed to read body for uterx_net.http_post"
+                );
+                return -1;
+            };
+
+            let headers = parse_http_headers(&headers_raw);
+            let (status, response_body) = match http_post_request(&url, &headers, &body) {
+                Ok(result) => result,
+                Err(err) => {
+                    tracing::warn!(plugin = %caller.data().manifest.name, error = %err, "http_post request failed");
+                    return -2;
+                }
+            };
+
+            let cap = response_len.max(0) as usize;
+            let write_len = response_body.len().min(cap);
+            if write_len > 0 {
+                if write_guest_bytes(&mut caller, response_ptr, &response_body[..write_len]).is_none() {
+                    tracing::warn!(
+                        plugin = %caller.data().manifest.name,
+                        "failed to write response buffer for uterx_net.http_post"
+                    );
+                    return -4;
+                }
+            }
+
+            caller.data_mut().net_http_calls.push(NetHttpCall {
+                method: "POST".to_string(),
+                url,
+                status,
+                request_bytes: body.len(),
+                bytes_written: write_len,
+            });
+
             status
         },
     )?;
@@ -777,6 +869,42 @@ fn tcp_connect_with_timeout(host: &str, port: u16, timeout: Duration) -> std::io
     Err(last_err.unwrap_or_else(|| std::io::Error::other("no socket addresses resolved")))
 }
 
+fn parse_http_headers(raw: &str) -> Vec<(String, String)> {
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+
+            let (name, value) = trimmed.split_once(':')?;
+            let name = name.trim();
+            let value = value.trim();
+            if name.is_empty() || value.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+fn http_post_request(
+    url: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> anyhow::Result<(i32, Vec<u8>)> {
+    let client = reqwest::blocking::Client::new();
+    let mut request = client.post(url).body(body.to_vec());
+    for (key, value) in headers {
+        request = request.header(key, value);
+    }
+
+    let response = request.send()?;
+    let status = i32::from(response.status().as_u16());
+    let bytes = response.bytes()?.to_vec();
+    Ok((status, bytes))
+}
+
 fn default_plugin_fs_root(wasm_path: &Path) -> PathBuf {
     let base = wasm_path
         .parent()
@@ -848,6 +976,43 @@ mod tests {
             queued_prompt_responses: HashMap::new(),
             permission_prompt_events: Vec::new(),
         }
+    }
+
+    #[test]
+    fn parse_http_headers_ignores_invalid_lines() {
+        let raw = "Authorization: Bearer token\nX-Test: value\ninvalid-line\nEmpty:\n";
+        let parsed = parse_http_headers(raw);
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, "Authorization");
+        assert_eq!(parsed[1].0, "X-Test");
+    }
+
+    #[test]
+    fn http_post_request_sends_body_and_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener local addr");
+
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept");
+            let mut request_buf = [0_u8; 4096];
+            let read = std::io::Read::read(&mut socket, &mut request_buf).expect("read request");
+            let request = String::from_utf8_lossy(&request_buf[..read]);
+            assert!(request.starts_with("POST /chat HTTP/1.1"));
+            assert!(request.contains("x-test: value") || request.contains("X-Test: value"));
+            assert!(request.contains("hello"));
+
+            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+            let _ = std::io::Write::write_all(&mut socket, response);
+        });
+
+        let url = format!("http://{}/chat", addr);
+        let headers = vec![("X-Test".to_string(), "value".to_string())];
+        let (status, body) = http_post_request(&url, &headers, b"hello").expect("post request");
+
+        assert_eq!(status, 200);
+        assert_eq!(body, b"ok");
+        server.join().expect("join server thread");
     }
 
     #[test]

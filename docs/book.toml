@@ -1,0 +1,25 @@
+[book]
+title = "uterx Documentation"
+authors = ["uterx Contributors"]
+description = "Super-Terminal App - A highly modular, extensible terminal emulator and multiplexer"
+language = "en"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "coal"
+git-repository-url = "https://github.com/yourusername/uterx"
+edit-url-template = "https://github.com/yourusername/uterx/edit/main/docs/{path}"
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 2
+boost-paragraph = 1
+expand = true
+heading-split-level = 2

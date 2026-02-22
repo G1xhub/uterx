@@ -1,0 +1,7 @@
+name = "quick-notes"
+version = "0.1.0"
+description = "Floating note panes with Markdown support that persist across sessions"
+author = "uterx"
+wasm_module = "quick-notes.wasm"
+entry_point = "_start"
+permissions = ["ui", "io", "filesystem"]

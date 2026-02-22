@@ -32,6 +32,7 @@ pub mod categories {
 
 // --- Network API ---
 // uterx_net::http_get(url_ptr: i32, url_len: i32, response_ptr: i32, response_len: i32) -> status: i32
+// uterx_net::http_post(url_ptr: i32, url_len: i32, headers_ptr: i32, headers_len: i32, body_ptr: i32, body_len: i32, response_ptr: i32, response_len: i32) -> status: i32
 // uterx_net::tcp_connect(host_ptr: i32, host_len: i32, port: u16) -> socket_id: u64
 
 // --- Filesystem API ---

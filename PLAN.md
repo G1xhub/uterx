@@ -213,6 +213,7 @@ uterx/
 - [x] Plugin repository / registry integration
 
 ### Phase 5 — Example Plugins
+- [ ] UterxAI — Multi-provider AI assistant pane (Claude/Gemini/OpenAI/xAI/Z.ai/Moonshot/Minimax)
 - [ ] Bluetooth Messaging
 - [ ] Mesh & WLAN Messaging
 - [ ] Midnight Blockchain Integration
@@ -329,14 +330,15 @@ common shell interactions (ls, vim, htop, etc).
 ### Sprint 6-8: Example Plugins (Phase 5)
 
 Build plugins in priority order:
-1. Converter (simplest, good test of plugin API)
-2. Network Tools (pnet-based, visual graphs)
-3. SSH Tools (russh async sessions)
-4. ~~Text/Code Editor~~ — **DONE** as built-in (syntect + modal vim); advanced plugin (helix + tree-sitter) may follow
-5. File Sharing (iroh + libp2p)
-6. Bluetooth Messaging (btleplug)
-7. Mesh & WLAN Messaging (libp2p + iroh)
-8. Midnight Blockchain (cardano-sdk-rs + halo2 ZK)
+1. UterxAI (multi-provider AI assistant pane with streaming)
+2. Converter (simplest, good test of plugin API)
+3. Network Tools (pnet-based, visual graphs)
+4. SSH Tools (russh async sessions)
+5. ~~Text/Code Editor~~ — **DONE** as built-in (syntect + modal vim); advanced plugin (helix + tree-sitter) may follow
+6. File Sharing (iroh + libp2p)
+7. Bluetooth Messaging (btleplug)
+8. Mesh & WLAN Messaging (libp2p + iroh)
+9. Midnight Blockchain (cardano-sdk-rs + halo2 ZK)
 
 ---
 
@@ -376,6 +378,12 @@ Build plugins in priority order:
 | 2026-02-22 | Phase 4 | **Permission Prompts (first-use grant/deny)** | Implemented first-use permission decision flow in plugin runtime for all host API domains. Runtime now records permission prompt events and supports queued decisions (`deny`, `grant once`, `grant always`), with enforcement wired into `uterx_ui`, `uterx_io`, `uterx_net`, `uterx_fs`, and `uterx_platform` host functions. Added tests for one-shot grants and persistent grants. `cargo test -p uterx-plugin` passes (10 tests). |
 | 2026-02-22 | Phase 4 | **Plugin Auto-Update Mechanism** | Implemented `PluginManager::update` for single/all plugins using persisted install-source metadata (`.uterx-install-source`) written during install. Supports re-install/update from original local path or URL source, includes update report (`updated`/`skipped`) and CLI wiring for `uterx plugin update [name]`. Added manager test covering local source version bump update path. `cargo test -p uterx-plugin` passes (11 tests); workspace `cargo check` passes (with pre-existing warnings in other crates). |
 | 2026-02-22 | Phase 4 | **Plugin Repository/Registry Integration** | Added registry-backed install resolution in plugin manager: if `uterx plugin add <name>` is not a path/URL, manager resolves `<name>` via local `registry.toml` in plugin directory (`[plugins] name = source`) and falls back to a default remote index URL. Integrated into install flow so registry names can resolve to URLs or local sources. Added test for local-registry-name install path. `cargo test -p uterx-plugin` passes (12 tests); workspace `cargo check` passes (with pre-existing warnings in other crates). |
+| 2026-02-22 | Phase 5 | **UterxAI Kickoff (plugin scaffold)** | Re-prioritized Phase 5 to start with `UterxAI`. Added new plugin crate scaffold at `plugins/uterxai` with `plugin.toml`, WASM entrypoint, and provider-agnostic configuration model for Claude/Gemini/OpenAI/xAI/Z.ai/Moonshot/Minimax profiles. Added parsing test for multi-provider config. `cargo test -p uterxai` passes (1 test); workspace `cargo check` passes (with pre-existing warnings in `uterx-ui`). |
+| 2026-02-22 | Phase 5 | **UterxAI Transport API Kickoff** | Extended plugin network host API with `uterx_net::http_post` (URL + header block + request body + response buffer), including runtime permission checks and request telemetry (`method`, request/response byte counts). Added header parser and local integration test for POST body/header handling. Updated host API contract docs accordingly. `cargo test -p uterx-plugin` passes (14 tests); workspace `cargo check` passes (with pre-existing warnings in `uterx-ui`). |
+| 2026-02-22 | Phase 5 | **UterxAI App Lifecycle (MVP wiring)** | Added UterxAI runtime initialization in app event loop: plugin manager scan + `uterxai` load/start on launch when plugins are enabled. Implemented dedicated UterxAI pane open/focus flow via `Ctrl+Shift+A`, with startup status text and runtime `uterx_io::write` output mirrored into pane grid. Keeps existing PTY pane behavior unchanged while enabling first end-to-end AI runtime loop. `cargo check -p uterx` passes; workspace `cargo check` passes (with pre-existing warnings in `uterx-ui`). |
+| 2026-02-22 | Phase 5 | **UterxAI UX: Palette + Help + Prompt Input** | Added `UterxAI` command to Command Palette and mapped it to open/focus the AI pane. Updated Help overlay with `Ctrl+Shift+A` shortcut. Implemented first prompt-input flow when UterxAI pane is focused: typed characters/editing buffer + Enter submits prompt, appends local transcript line, and forwards prompt bytes into plugin stream input channel for upcoming runtime-side processing. `cargo check -p uterx` and workspace `cargo check` pass (with pre-existing warnings in `uterx-ui`). |
+| 2026-02-22 | Phase 5 | **UterxAI End-to-End Poll Loop (MVP)** | Implemented `uterxai_poll` export in plugin scaffold: reads prompt bytes via `uterx_io::read`, generates response text, and writes chunked output via `uterx_io::write`. Added runtime helper to invoke arbitrary `() -> i32` plugin exports and wired app prompt submit to call `uterxai_poll` immediately after enqueueing input. This closes the first full prompt→plugin→host-output loop in-pane. `cargo check -p uterxai`, `cargo check -p uterx-plugin`, and `cargo check -p uterx` pass (with pre-existing warnings in `uterx-ui`). |
+| 2026-02-22 | Phase 5 | **UterxAI Provider Integration (z.ai)** | Replaced echo responder with real provider call path for z.ai in `uterxai_poll`: reads prompts from `uterx_io`, resolves API key from `ZAI_API_KEY` (fallback keyring key `zai_api_key`), sends JSON chat request via `uterx_net::http_post`, parses response content, and streams formatted chunks back to pane output. Added response-content parser test and env overrides for endpoint/model (`UTERXAI_ZAI_URL`, `UTERXAI_ZAI_MODEL`). `cargo check -p uterxai` and workspace `cargo check` pass (with pre-existing warnings in `uterx-ui`). |
 | 2026-02-21 | Phase 7 | **Feature Brainstorming** | 10 innovative new features designed: Smart Workspace Manager, Pane Snippets & Templates, Real-time Process Monitor, Intelligent Search Across Panes, Pane History & Replay, Collaborative Editing, Keyboard Macro System, Integrated Git Graph, Task Runner & Dashboard, Smart Notifications & Alerts. Top 3 recommendations prioritized for performance and innovation. |
 
 ---

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "rust-best-practices": {
+      "source": "apollographql/skills",
+      "sourceType": "github",
+      "computedHash": "3d80db37cef0198fe21f6f10363bbe0a7cb3f36afab49d0f3270fad4abc2a6d9"
+    },
+    "rust-skills": {
+      "source": "leonardomso/rust-skills",
+      "sourceType": "github",
+      "computedHash": "d099b313fcb795ef568b0856d34a8bcfc16864b8ae5bb3729f038c97893e0132"
+    }
+  }
+}

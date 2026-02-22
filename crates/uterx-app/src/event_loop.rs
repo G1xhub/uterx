@@ -30,8 +30,11 @@ use ratatui::{
     widgets::{Block, Borders},
     Terminal,
 };
+use std::fs;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use uterx_plugin::{PluginInstance, PluginManager};
 use uterx_mux::{Layout as MuxLayout, Rect as MuxRect, Session};
 use uterx_ui::input::{Action, InputHandler};
 use uterx_ui::widgets::command_palette::{default_commands, CommandEntry, CommandPalette};
@@ -99,6 +102,46 @@ struct TiledReorderDragState {
     pane_id: uterx_mux::PaneId,
 }
 
+struct UterxAiRuntime {
+    instance: Option<PluginInstance>,
+    pane_id: Option<uterx_mux::PaneId>,
+    last_io_write_count: usize,
+    prompt_buffer: String,
+    status: String,
+    transcript: Vec<String>,
+    settings_path: Option<PathBuf>,
+    api_key: String,
+    api_url: String,
+    api_model: String,
+    setup_mode: bool,
+    setup_field: UterxAiSetupField,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UterxAiSetupField {
+    ApiKey,
+    ApiUrl,
+    ApiModel,
+}
+
+impl UterxAiSetupField {
+    fn next(self) -> Self {
+        match self {
+            Self::ApiKey => Self::ApiUrl,
+            Self::ApiUrl => Self::ApiModel,
+            Self::ApiModel => Self::ApiModel,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            Self::ApiKey => Self::ApiKey,
+            Self::ApiUrl => Self::ApiKey,
+            Self::ApiModel => Self::ApiUrl,
+        }
+    }
+}
+
 /// Run the main terminal event loop.
 pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<()> {
     // Setup terminal
@@ -133,6 +176,7 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
     };
     let mut session = build_initial_session(&shell, pane_area, restore_on_launch)?;
     normalize_focus_state(&mut session);
+    let mut uterxai = init_uterxai_runtime(&cfg);
 
     let input_handler = InputHandler::new();
 
@@ -179,6 +223,7 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
     loop {
         // Process PTY output for all panes
         session.process_all_pty_output();
+        sync_uterxai_output_into_pane(&mut session, &mut uterxai);
 
         // Render
         let fb_visible = file_browser.visible;
@@ -552,6 +597,7 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
                                                 if execute_palette_action(
                                                     a,
                                                     &mut session,
+                                                    &mut uterxai,
                                                     &mut overlay,
                                                     &mut file_browser,
                                                     &mut focus,
@@ -583,6 +629,28 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
                         }
 
                         // ── Global keybindings (always processed) ──
+                        if overlay == Overlay::None
+                            && focus == Focus::Terminal
+                            && handle_uterxai_prompt_key(&key, &mut session, &mut uterxai)
+                        {
+                            continue;
+                        }
+
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.modifiers.contains(KeyModifiers::SHIFT)
+                            && matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
+                        {
+                            let area = compute_pane_area(
+                                &terminal,
+                                show_tab_bar,
+                                show_status_bar,
+                                if file_browser.visible { file_browser.width } else { 0 },
+                            );
+                            open_or_focus_uterxai_pane(&mut session, &mut uterxai, area);
+                            focus = Focus::Terminal;
+                            continue;
+                        }
+
                         if let Some(action) = input_handler.resolve(&key) {
                             match action {
                                 Action::Quit => break,
@@ -1277,6 +1345,512 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
     Ok(())
 }
 
+fn init_uterxai_runtime(cfg: &AppConfig) -> UterxAiRuntime {
+    let default_url = "https://api.z.ai/v1/chat/completions".to_string();
+    let default_model = "glm-4.5-air".to_string();
+
+    if !cfg.plugins.enabled {
+        return UterxAiRuntime {
+            instance: None,
+            pane_id: None,
+            last_io_write_count: 0,
+            prompt_buffer: String::new(),
+            status: "UterxAI disabled by config".to_string(),
+            transcript: Vec::new(),
+            settings_path: None,
+            api_key: String::new(),
+            api_url: default_url,
+            api_model: default_model,
+            setup_mode: false,
+            setup_field: UterxAiSetupField::ApiKey,
+        };
+    }
+
+    let mut manager = PluginManager::new(cfg.plugins_dir());
+    if let Err(err) = manager.scan() {
+        return UterxAiRuntime {
+            instance: None,
+            pane_id: None,
+            last_io_write_count: 0,
+            prompt_buffer: String::new(),
+            status: format!("UterxAI scan failed: {}", err),
+            transcript: Vec::new(),
+            settings_path: None,
+            api_key: String::new(),
+            api_url: default_url,
+            api_model: default_model,
+            setup_mode: true,
+            setup_field: UterxAiSetupField::ApiKey,
+        };
+    }
+
+    let Some(manifest) = manager.get("uterxai").cloned() else {
+        return UterxAiRuntime {
+            instance: None,
+            pane_id: None,
+            last_io_write_count: 0,
+            prompt_buffer: String::new(),
+            status: "UterxAI not installed (run: uterx plugin add uterxai)".to_string(),
+            transcript: Vec::new(),
+            settings_path: None,
+            api_key: String::new(),
+            api_url: default_url,
+            api_model: default_model,
+            setup_mode: true,
+            setup_field: UterxAiSetupField::ApiKey,
+        };
+    };
+
+    let Some(wasm_path) = manager.wasm_path("uterxai") else {
+        return UterxAiRuntime {
+            instance: None,
+            pane_id: None,
+            last_io_write_count: 0,
+            prompt_buffer: String::new(),
+            status: "UterxAI wasm path missing".to_string(),
+            transcript: Vec::new(),
+            settings_path: None,
+            api_key: String::new(),
+            api_url: default_url,
+            api_model: default_model,
+            setup_mode: true,
+            setup_field: UterxAiSetupField::ApiKey,
+        };
+    };
+
+    let settings_path = wasm_path
+        .parent()
+        .map(|plugin_dir| {
+            plugin_dir
+                .join("plugin_fs")
+                .join("uterxai")
+                .join("provider.toml")
+        });
+
+    let (api_key, api_url, api_model) = settings_path
+        .as_deref()
+        .and_then(load_uterxai_settings)
+        .unwrap_or_else(|| (String::new(), default_url.clone(), default_model.clone()));
+    let setup_mode = api_key.trim().is_empty();
+
+    let granted_permissions = manifest.permissions.clone();
+    match PluginInstance::load(&wasm_path, manifest, granted_permissions) {
+        Ok(mut instance) => {
+            if let Err(err) = instance.start() {
+                UterxAiRuntime {
+                    instance: None,
+                    pane_id: None,
+                    last_io_write_count: 0,
+                    prompt_buffer: String::new(),
+                    status: format!("UterxAI start failed: {}", err),
+                    transcript: Vec::new(),
+                    settings_path,
+                    api_key,
+                    api_url,
+                    api_model,
+                    setup_mode,
+                    setup_field: UterxAiSetupField::ApiKey,
+                }
+            } else {
+                UterxAiRuntime {
+                    instance: Some(instance),
+                    pane_id: None,
+                    last_io_write_count: 0,
+                    prompt_buffer: String::new(),
+                    status: if setup_mode {
+                        "UterxAI setup required (Ctrl+Shift+A)".to_string()
+                    } else {
+                        "UterxAI runtime ready (Ctrl+Shift+A)".to_string()
+                    },
+                    transcript: Vec::new(),
+                    settings_path,
+                    api_key,
+                    api_url,
+                    api_model,
+                    setup_mode,
+                    setup_field: UterxAiSetupField::ApiKey,
+                }
+            }
+        }
+        Err(err) => UterxAiRuntime {
+            instance: None,
+            pane_id: None,
+            last_io_write_count: 0,
+            prompt_buffer: String::new(),
+            status: format!("UterxAI load failed: {}", err),
+            transcript: Vec::new(),
+            settings_path,
+            api_key,
+            api_url,
+            api_model,
+            setup_mode,
+            setup_field: UterxAiSetupField::ApiKey,
+        },
+    }
+}
+
+fn load_uterxai_settings(path: &Path) -> Option<(String, String, String)> {
+    #[derive(serde::Deserialize)]
+    struct ProviderSettings {
+        api_key: Option<String>,
+        api_url: Option<String>,
+        api_model: Option<String>,
+    }
+
+    let raw = fs::read_to_string(path).ok()?;
+    let parsed: ProviderSettings = toml::from_str(&raw).ok()?;
+    let key = parsed.api_key.unwrap_or_default().trim().to_string();
+    let url = parsed
+        .api_url
+        .unwrap_or_else(|| "https://api.z.ai/v1/chat/completions".to_string())
+        .trim()
+        .to_string();
+    let model = parsed
+        .api_model
+        .unwrap_or_else(|| "glm-4.5-air".to_string())
+        .trim()
+        .to_string();
+    Some((key, url, model))
+}
+
+fn save_uterxai_settings(path: &Path, key: &str, url: &str, model: &str) -> anyhow::Result<()> {
+    #[derive(serde::Serialize)]
+    struct ProviderSettings<'a> {
+        api_key: &'a str,
+        api_url: &'a str,
+        api_model: &'a str,
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let body = toml::to_string_pretty(&ProviderSettings {
+        api_key: key,
+        api_url: url,
+        api_model: model,
+    })?;
+    fs::write(path, body)?;
+    Ok(())
+}
+
+fn mask_secret(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return "[not set]".to_string();
+    }
+    let count = trimmed.chars().count();
+    if count <= 6 {
+        return "*".repeat(count.max(1));
+    }
+    let head: String = trimmed.chars().take(3).collect();
+    let tail: String = trimmed
+        .chars()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{}{}{}", head, "*".repeat(count - 6), tail)
+}
+
+fn render_uterxai_pane(session: &mut Session, runtime: &UterxAiRuntime) {
+    let Some(pane_id) = runtime.pane_id else {
+        return;
+    };
+    let Some(tab) = session.active_tab_mut() else {
+        return;
+    };
+    let Some(pane) = tab.panes.iter_mut().find(|pane| pane.id == pane_id) else {
+        return;
+    };
+
+    pane.grid.clear();
+    pane.grid.title = "UterxAI".to_string();
+
+    append_text_to_grid(&mut pane.grid, "UterxAI");
+    append_text_to_grid(&mut pane.grid, &runtime.status);
+
+    if runtime.setup_mode {
+        append_text_to_grid(&mut pane.grid, "Setup: configure provider.toml in-app");
+        append_text_to_grid(&mut pane.grid, "Use Up/Down/Tab to move, Enter to continue/save.");
+
+        let key_prefix = if runtime.setup_field == UterxAiSetupField::ApiKey {
+            ">"
+        } else {
+            " "
+        };
+        let url_prefix = if runtime.setup_field == UterxAiSetupField::ApiUrl {
+            ">"
+        } else {
+            " "
+        };
+        let model_prefix = if runtime.setup_field == UterxAiSetupField::ApiModel {
+            ">"
+        } else {
+            " "
+        };
+
+        append_text_to_grid(
+            &mut pane.grid,
+            &format!("{} API Key  : {}", key_prefix, mask_secret(&runtime.api_key)),
+        );
+        append_text_to_grid(
+            &mut pane.grid,
+            &format!("{} API URL  : {}", url_prefix, runtime.api_url),
+        );
+        append_text_to_grid(
+            &mut pane.grid,
+            &format!("{} API Model: {}", model_prefix, runtime.api_model),
+        );
+        return;
+    }
+
+    append_text_to_grid(&mut pane.grid, "Chat transcript:");
+    for line in &runtime.transcript {
+        append_text_to_grid(&mut pane.grid, line);
+    }
+    append_text_to_grid(&mut pane.grid, &format!("> {}", runtime.prompt_buffer));
+}
+
+fn open_or_focus_uterxai_pane(session: &mut Session, runtime: &mut UterxAiRuntime, area: MuxRect) {
+    if let Some(existing_id) = runtime.pane_id {
+        if focus_pane_by_id(session, existing_id) {
+            render_uterxai_pane(session, runtime);
+            return;
+        }
+        runtime.pane_id = None;
+    }
+
+    let pane_id = uterx_mux::PaneId(session.next_id());
+    let pane_rect = uterx_mux::Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.max(20),
+        height: area.height.max(5),
+    };
+    let mut pane = uterx_mux::Pane::new_bare(pane_id, pane_rect);
+    pane.grid.title = "UterxAI".to_string();
+
+    if let Some(tab) = session.active_tab_mut() {
+        for p in &mut tab.panes {
+            p.focused = false;
+        }
+        pane.focused = true;
+        tab.active_pane = Some(pane_id);
+        tab.add_pane(pane);
+        tab.relayout(area);
+    }
+    runtime.pane_id = Some(pane_id);
+    render_uterxai_pane(session, runtime);
+}
+
+fn focus_pane_by_id(session: &mut Session, pane_id: uterx_mux::PaneId) -> bool {
+    let Some(tab) = session.active_tab_mut() else {
+        return false;
+    };
+
+    if !tab.panes.iter().any(|pane| pane.id == pane_id) {
+        return false;
+    }
+    for pane in &mut tab.panes {
+        pane.focused = pane.id == pane_id;
+    }
+    tab.active_pane = Some(pane_id);
+    true
+}
+
+fn sync_uterxai_output_into_pane(session: &mut Session, runtime: &mut UterxAiRuntime) {
+    let Some(instance) = runtime.instance.as_ref() else {
+        return;
+    };
+    let Some(pane_id) = runtime.pane_id else {
+        return;
+    };
+
+    let io_calls = instance.io_write_calls();
+    if runtime.last_io_write_count >= io_calls.len() {
+        return;
+    }
+
+    for call in &io_calls[runtime.last_io_write_count..] {
+        let text = String::from_utf8_lossy(&call.bytes);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                runtime.transcript.push(trimmed.to_string());
+            }
+        }
+    }
+    runtime.last_io_write_count = io_calls.len();
+    if !focus_pane_by_id(session, pane_id) {
+        runtime.pane_id = None;
+        return;
+    }
+    render_uterxai_pane(session, runtime);
+}
+
+fn handle_uterxai_prompt_key(
+    key: &crossterm::event::KeyEvent,
+    session: &mut Session,
+    runtime: &mut UterxAiRuntime,
+) -> bool {
+    let Some(ai_pane_id) = runtime.pane_id else {
+        return false;
+    };
+
+    let Some(active_tab) = session.active_tab() else {
+        return false;
+    };
+    if active_tab.active_pane != Some(ai_pane_id) {
+        return false;
+    }
+
+    if runtime.setup_mode {
+        let mut consumed = true;
+        match key.code {
+            KeyCode::Up => {
+                runtime.setup_field = runtime.setup_field.prev();
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                runtime.setup_field = runtime.setup_field.next();
+            }
+            KeyCode::Backspace => match runtime.setup_field {
+                UterxAiSetupField::ApiKey => {
+                    runtime.api_key.pop();
+                }
+                UterxAiSetupField::ApiUrl => {
+                    runtime.api_url.pop();
+                }
+                UterxAiSetupField::ApiModel => {
+                    runtime.api_model.pop();
+                }
+            },
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                match runtime.setup_field {
+                    UterxAiSetupField::ApiKey => runtime.api_key.push(c),
+                    UterxAiSetupField::ApiUrl => runtime.api_url.push(c),
+                    UterxAiSetupField::ApiModel => runtime.api_model.push(c),
+                }
+            }
+            KeyCode::Enter => {
+                if runtime.setup_field != UterxAiSetupField::ApiModel {
+                    runtime.setup_field = runtime.setup_field.next();
+                } else {
+                    let key_text = runtime.api_key.trim().to_string();
+                    let url_text = if runtime.api_url.trim().is_empty() {
+                        "https://api.z.ai/v1/chat/completions".to_string()
+                    } else {
+                        runtime.api_url.trim().to_string()
+                    };
+                    let model_text = if runtime.api_model.trim().is_empty() {
+                        "glm-4.5-air".to_string()
+                    } else {
+                        runtime.api_model.trim().to_string()
+                    };
+
+                    runtime.api_key = key_text.clone();
+                    runtime.api_url = url_text.clone();
+                    runtime.api_model = model_text.clone();
+
+                    match runtime.settings_path.as_deref() {
+                        Some(path) => {
+                            match save_uterxai_settings(path, &key_text, &url_text, &model_text) {
+                                Ok(()) => {
+                                    runtime.setup_mode = key_text.is_empty();
+                                    if runtime.setup_mode {
+                                        runtime.status = "UterxAI setup incomplete: API key required".to_string();
+                                    } else {
+                                        runtime.status = "UterxAI setup saved".to_string();
+                                        runtime.transcript.push("UterxAI setup completed.".to_string());
+                                    }
+                                }
+                                Err(err) => {
+                                    runtime.status = format!("UterxAI setup save failed: {}", err);
+                                }
+                            }
+                        }
+                        None => {
+                            runtime.status = "UterxAI setup path unavailable".to_string();
+                        }
+                    }
+                }
+            }
+            _ => {
+                consumed = false;
+            }
+        }
+
+        if consumed {
+            render_uterxai_pane(session, runtime);
+        }
+        return consumed;
+    }
+
+    match key.code {
+        KeyCode::Enter => {
+            let prompt = runtime.prompt_buffer.trim().to_string();
+            if prompt.is_empty() {
+                render_uterxai_pane(session, runtime);
+                return true;
+            }
+            runtime.prompt_buffer.clear();
+            runtime.transcript.push(format!("> {}", prompt));
+            runtime.transcript.push("UterxAI: prompt accepted (stream pending)".to_string());
+
+            if let Some(instance) = runtime.instance.as_mut() {
+                instance.push_ai_stream_chunk(1, prompt.as_bytes());
+                instance.push_ai_stream_chunk(1, b"\n");
+
+                if let Err(err) = instance.call_i32_func("uterxai_poll") {
+                    runtime
+                        .transcript
+                        .push(format!("UterxAI poll failed: {}", err));
+                }
+            } else {
+                runtime
+                    .transcript
+                    .push("UterxAI runtime unavailable".to_string());
+            }
+            render_uterxai_pane(session, runtime);
+            true
+        }
+        KeyCode::Backspace => {
+            runtime.prompt_buffer.pop();
+            render_uterxai_pane(session, runtime);
+            true
+        }
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            runtime.prompt_buffer.push(c);
+            render_uterxai_pane(session, runtime);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn append_text_to_grid(grid: &mut uterx_core::Grid, text: &str) {
+    for ch in text.chars() {
+        if ch == '\n' {
+            grid.cursor_col = 0;
+            grid.newline();
+        } else if ch == '\r' {
+            grid.cursor_col = 0;
+        } else {
+            grid.write_char(ch);
+        }
+    }
+    grid.cursor_col = 0;
+    grid.newline();
+}
+
 fn build_initial_session(
     shell: &str,
     pane_area: MuxRect,
@@ -1362,6 +1936,7 @@ enum PaletteAction {
     PrevPane,
     Broadcast,
     FileBrowser,
+    UterxAi,
     ToggleFloat,
 }
 
@@ -1379,6 +1954,7 @@ fn palette_action_for(cmd: &CommandEntry) -> Option<PaletteAction> {
         "Toggle Broadcast" => Some(PaletteAction::Broadcast),
         "Help" => Some(PaletteAction::Help),
         "File Browser" => Some(PaletteAction::FileBrowser),
+        "UterxAI" => Some(PaletteAction::UterxAi),
         "Toggle Floating" => Some(PaletteAction::ToggleFloat),
         "Quit" => Some(PaletteAction::Quit),
         _ => None,
@@ -1389,6 +1965,7 @@ fn palette_action_for(cmd: &CommandEntry) -> Option<PaletteAction> {
 fn execute_palette_action(
     action: PaletteAction,
     session: &mut Session,
+    uterxai: &mut UterxAiRuntime,
     overlay: &mut Overlay,
     file_browser: &mut FileBrowserState,
     focus: &mut Focus,
@@ -1413,6 +1990,11 @@ fn execute_palette_action(
             let area = compute_pane_area(terminal, show_tab_bar, show_status_bar,
                 if file_browser.visible { file_browser.width } else { 0 });
             session.relayout_all(area);
+        }
+        PaletteAction::UterxAi => {
+            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, sidebar_w);
+            open_or_focus_uterxai_pane(session, uterxai, area);
+            *focus = Focus::Terminal;
         }
         PaletteAction::NewTab => {
             let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, sidebar_w);

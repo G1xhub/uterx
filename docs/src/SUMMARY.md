@@ -1,0 +1,18 @@
+# Summary
+
+- [Introduction](introduction.md)
+- [Getting Started](getting-started.md)
+- [Architecture](architecture.md)
+- [Development Phases](phases.md)
+  - [Phase 1: Core Terminal](phase1-core-terminal.md)
+  - [Phase 2: Multiplexer](phase2-multiplexer.md)
+  - [Phase 3: GPU Rendering](phase3-gpu-rendering.md)
+  - [Phase 4: Plugin System](phase4-plugin-system.md)
+  - [Phase 5: Example Plugins](phase5-example-plugins.md)
+  - [Phase 6: Polish & Release](phase6-polish-release.md)
+  - [Phase 7: Innovative Features](phase7-innovative-features.md)
+- [API Reference](api-reference.md)
+- [Configuration](configuration.md)
+- [Plugins](plugins.md)
+- [Contributing](contributing.md)
+- [License](license.md)

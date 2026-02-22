@@ -9,6 +9,8 @@ members = [
     "crates/uterx-platform",
     "crates/uterx-app",
     "xtask",
+    "plugins/uterxai",
+    "plugins/quick-notes",
     # Plugins (native crates — compiled to WASM separately)
     # Uncomment as plugins are created:
     # "plugins/bluetooth",
@@ -56,6 +58,7 @@ ring = "0.17"
 
 # Config / Serialization
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 
 # CLI

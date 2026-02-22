@@ -26,6 +26,7 @@ fn main() {
 
 fn build_plugins() {
     let plugins = [
+        "plugins/uterxai",
         "plugins/bluetooth",
         "plugins/mesh-chat",
         "plugins/midnight",
