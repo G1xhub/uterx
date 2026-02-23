@@ -30,6 +30,7 @@ use ratatui::{
     widgets::{Block, Borders},
     Terminal,
 };
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,7 @@ use uterx_plugin::{PluginInstance, PluginManager};
 use uterx_mux::{Layout as MuxLayout, Rect as MuxRect, Session};
 use uterx_ui::input::{Action, InputHandler};
 use uterx_ui::widgets::command_palette::{default_commands, CommandEntry, CommandPalette};
+use uterx_ui::widgets::context_menu::{ContextMenuAction, ContextMenuWidget};
 use uterx_ui::widgets::editor::{EditorState, EditorWidget, EditorMode};
 use uterx_ui::widgets::file_browser::{FileBrowserState, FileBrowserWidget};
 use uterx_ui::widgets::help_overlay::HelpOverlay;
@@ -51,6 +53,7 @@ enum Overlay {
     None,
     Help,
     CommandPalette,
+    PluginLauncher,
 }
 
 /// Where keyboard input is currently directed.
@@ -117,6 +120,16 @@ struct UterxAiRuntime {
     setup_field: UterxAiSetupField,
 }
 
+struct GenericPluginRuntime {
+    name: String,
+    instance: Option<PluginInstance>,
+    pane_id: Option<uterx_mux::PaneId>,
+    last_io_write_count: usize,
+    prompt_buffer: String,
+    status: String,
+    transcript: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UterxAiSetupField {
     ApiKey,
@@ -177,14 +190,20 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
     let mut session = build_initial_session(&shell, pane_area, restore_on_launch)?;
     normalize_focus_state(&mut session);
     let mut uterxai = init_uterxai_runtime(&cfg);
+    let plugins_dir = cfg.plugins_dir();
+    let mut plugin_runtimes: Vec<GenericPluginRuntime> = Vec::new();
+    let mut last_plugin_name: Option<String> = None;
 
     let input_handler = InputHandler::new();
 
     // Command palette state
-    let commands = default_commands();
+    let mut commands = default_commands();
+    extend_palette_with_installed_plugins(&mut commands, &plugins_dir);
     let mut palette_selected: usize = 0;
     let mut palette_filter = String::new();
     let mut filtered_commands: Vec<CommandEntry> = commands.clone();
+    let mut plugin_launcher_entries = installed_plugin_names(&plugins_dir);
+    let mut plugin_launcher_selected: usize = 0;
 
     // File browser state
     let home = std::env::var("USERPROFILE")
@@ -224,6 +243,7 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
         // Process PTY output for all panes
         session.process_all_pty_output();
         sync_uterxai_output_into_pane(&mut session, &mut uterxai);
+        sync_generic_plugin_output_into_panes(&mut session, &mut plugin_runtimes);
 
         // Render
         let fb_visible = file_browser.visible;
@@ -307,6 +327,12 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
                 let fb_widget = FileBrowserWidget::new(&file_browser, fb_focused)
                     .hovered_entry(file_browser_hover_entry);
                 frame.render_widget(fb_widget, sb_area);
+                
+                // Render context menu if visible
+                if file_browser.context_menu.visible {
+                    let cm_widget = ContextMenuWidget::new(&file_browser.context_menu);
+                    frame.render_widget(cm_widget, frame.area());
+                }
             }
 
             // ── Terminal panes ──
@@ -552,6 +578,72 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
                     );
                     frame.render_widget(palette, area);
                 }
+                Overlay::PluginLauncher => {
+                    let panel_w = 56u16.min(area.width.saturating_sub(4));
+                    let list_h = plugin_launcher_entries.len().min(12) as u16;
+                    let panel_h = (list_h + 7).min(area.height.saturating_sub(4));
+                    let px = area.x + (area.width.saturating_sub(panel_w)) / 2;
+                    let py = area.y + (area.height.saturating_sub(panel_h)) / 3;
+                    let panel_area = ratatui::layout::Rect {
+                        x: px,
+                        y: py,
+                        width: panel_w,
+                        height: panel_h,
+                    };
+
+                    let panel = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Rgb(137, 180, 250)))
+                        .title(Span::styled(
+                            " Plugin Launcher ",
+                            Style::default()
+                                .fg(Color::Rgb(137, 180, 250))
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    let inner = panel.inner(panel_area);
+                    frame.render_widget(panel, panel_area);
+
+                    let buf = frame.buffer_mut();
+                    let hint_style = Style::default().fg(Color::Rgb(166, 173, 200));
+                    buf.set_string(
+                        inner.x,
+                        inner.y,
+                        "Enter launch/focus  •  Esc close",
+                        hint_style,
+                    );
+
+                    if plugin_launcher_entries.is_empty() {
+                        buf.set_string(
+                            inner.x,
+                            inner.y.saturating_add(2),
+                            "No plugins installed",
+                            Style::default().fg(Color::Rgb(243, 139, 168)),
+                        );
+                    } else {
+                        let list_y = inner.y.saturating_add(2);
+                        let max_rows = inner.height.saturating_sub(3) as usize;
+                        for (idx, name) in plugin_launcher_entries.iter().take(max_rows).enumerate() {
+                            let y = list_y.saturating_add(idx as u16);
+                            let selected = idx == plugin_launcher_selected;
+                            let (prefix, style) = if selected {
+                                ("> ",
+                                Style::default()
+                                    .fg(Color::Rgb(30, 30, 46))
+                                    .bg(Color::Rgb(166, 227, 161))
+                                    .add_modifier(Modifier::BOLD),
+                                )
+                            } else {
+                                (
+                                    "  ",
+                                    Style::default().fg(Color::Rgb(205, 214, 244)),
+                                )
+                            };
+                            let text = format!("{}{}", prefix, name);
+                            let padded = format!("{:<width$}", text, width = inner.width as usize);
+                            buf.set_string(inner.x, y, padded, style);
+                        }
+                    }
+                }
                 Overlay::None => {}
             }
         })?;
@@ -587,6 +679,13 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
                                     }
                                     KeyCode::Enter => {
                                         if let Some(cmd) = filtered_commands.get(palette_selected) {
+                                            if cmd.label == "Plugin Launcher" {
+                                                plugin_launcher_entries = installed_plugin_names(&plugins_dir);
+                                                plugin_launcher_selected = 0;
+                                                overlay = Overlay::PluginLauncher;
+                                                continue;
+                                            }
+
                                             let action = palette_action_for(cmd);
                                             overlay = Overlay::None;
                                             palette_filter.clear();
@@ -598,11 +697,14 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
                                                     a,
                                                     &mut session,
                                                     &mut uterxai,
+                                                    &mut plugin_runtimes,
+                                                    &mut last_plugin_name,
                                                     &mut overlay,
                                                     &mut file_browser,
                                                     &mut focus,
                                                     &terminal,
                                                     &shell,
+                                                    &plugins_dir,
                                                     show_tab_bar,
                                                     show_status_bar,
                                                 ) {
@@ -625,14 +727,74 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
                                 }
                                 continue;
                             }
+                            Overlay::PluginLauncher => {
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        overlay = Overlay::None;
+                                    }
+                                    KeyCode::Up => {
+                                        if plugin_launcher_selected > 0 {
+                                            plugin_launcher_selected -= 1;
+                                        }
+                                    }
+                                    KeyCode::Down => {
+                                        if plugin_launcher_selected + 1 < plugin_launcher_entries.len() {
+                                            plugin_launcher_selected += 1;
+                                        }
+                                    }
+                                    KeyCode::Enter => {
+                                        if let Some(name) = plugin_launcher_entries.get(plugin_launcher_selected) {
+                                            let area = compute_pane_area(
+                                                &terminal,
+                                                show_tab_bar,
+                                                show_status_bar,
+                                                if file_browser.visible { file_browser.width } else { 0 },
+                                            );
+                                            if name == "uterxai" {
+                                                open_or_focus_uterxai_pane(&mut session, &mut uterxai, area);
+                                            } else {
+                                                open_or_focus_generic_plugin_pane(
+                                                    &mut session,
+                                                    &mut plugin_runtimes,
+                                                    &plugins_dir,
+                                                    name,
+                                                    area,
+                                                );
+                                            }
+                                            last_plugin_name = Some(name.clone());
+                                            focus = Focus::Terminal;
+                                            overlay = Overlay::None;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
                             Overlay::None => {}
                         }
 
                         // ── Global keybindings (always processed) ──
                         if overlay == Overlay::None
                             && focus == Focus::Terminal
+                            && handle_generic_plugin_prompt_key(&key, &mut session, &mut plugin_runtimes)
+                        {
+                            continue;
+                        }
+
+                        if overlay == Overlay::None
+                            && focus == Focus::Terminal
                             && handle_uterxai_prompt_key(&key, &mut session, &mut uterxai)
                         {
+                            continue;
+                        }
+
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.modifiers.contains(KeyModifiers::SHIFT)
+                            && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
+                        {
+                            plugin_launcher_entries = installed_plugin_names(&plugins_dir);
+                            plugin_launcher_selected = 0;
+                            overlay = Overlay::PluginLauncher;
                             continue;
                         }
 
@@ -647,7 +809,35 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
                                 if file_browser.visible { file_browser.width } else { 0 },
                             );
                             open_or_focus_uterxai_pane(&mut session, &mut uterxai, area);
+                            last_plugin_name = Some("uterxai".to_string());
                             focus = Focus::Terminal;
+                            continue;
+                        }
+
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.modifiers.contains(KeyModifiers::SHIFT)
+                            && matches!(key.code, KeyCode::Char('l') | KeyCode::Char('L'))
+                        {
+                            if let Some(name) = last_plugin_name.as_deref() {
+                                let area = compute_pane_area(
+                                    &terminal,
+                                    show_tab_bar,
+                                    show_status_bar,
+                                    if file_browser.visible { file_browser.width } else { 0 },
+                                );
+                                if name == "uterxai" {
+                                    open_or_focus_uterxai_pane(&mut session, &mut uterxai, area);
+                                } else {
+                                    open_or_focus_generic_plugin_pane(
+                                        &mut session,
+                                        &mut plugin_runtimes,
+                                        &plugins_dir,
+                                        name,
+                                        area,
+                                    );
+                                }
+                                focus = Focus::Terminal;
+                            }
                             continue;
                         }
 
@@ -728,6 +918,39 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
                                     }
                                     KeyCode::Char(c) => {
                                         file_browser.search_push(c);
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
+                            // ── Context menu keyboard navigation ──
+                            if file_browser.context_menu.visible {
+                                match key.code {
+                                    KeyCode::Up => {
+                                        file_browser.context_menu.select_up();
+                                    }
+                                    KeyCode::Down => {
+                                        file_browser.context_menu.select_down();
+                                    }
+                                    KeyCode::Enter => {
+                                        if let Some(action) = file_browser.context_menu.selected_action() {
+                                            file_browser.context_menu.hide();
+                                            let sb_w = if file_browser.visible { file_browser.width } else { 0 };
+                                            execute_context_menu_action(
+                                                action,
+                                                &mut file_browser,
+                                                &mut session,
+                                                &shell,
+                                                &terminal,
+                                                show_tab_bar,
+                                                show_status_bar,
+                                                sb_w,
+                                            );
+                                        }
+                                    }
+                                    KeyCode::Esc => {
+                                        file_browser.context_menu.hide();
                                     }
                                     _ => {}
                                 }
@@ -1159,8 +1382,61 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
                                 continue;
                             }
 
+                            // ── Context menu handling (highest priority) ──
+                            if file_browser.context_menu.visible {
+                                match mouse.kind {
+                                    MouseEventKind::Down(MouseButton::Left) => {
+                                        // Check if click is inside context menu
+                                        let cm = &file_browser.context_menu;
+                                        let menu_w = cm.needed_width();
+                                        let menu_h = cm.needed_height();
+                                        if mouse.column >= cm.x && mouse.column < cm.x + menu_w
+                                            && mouse.row >= cm.y && mouse.row < cm.y + menu_h
+                                        {
+                                            // Click inside menu - select item
+                                            let item_y = cm.y + 1;
+                                            let mut row_y = item_y;
+                                            for item in cm.items.iter() {
+                                                if mouse.row == row_y {
+                                                    if item.enabled {
+                                                        let action = item.action;
+                                                        file_browser.context_menu.hide();
+                                                        execute_context_menu_action(
+                                                            action,
+                                                            &mut file_browser,
+                                                            &mut session,
+                                                            &shell,
+                                                            &terminal,
+                                                            show_tab_bar,
+                                                            show_status_bar,
+                                                            sidebar_w,
+                                                        );
+                                                    }
+                                                    break;
+                                                }
+                                                row_y += 1;
+                                                if item.separator_after {
+                                                    row_y += 1;
+                                                }
+                                            }
+                                        } else {
+                                            // Click outside menu - close it
+                                            file_browser.context_menu.hide();
+                                        }
+                                        continue;
+                                    }
+                                    MouseEventKind::Down(MouseButton::Right) => {
+                                        // Right-click while menu open - close and reposition
+                                        file_browser.context_menu.hide();
+                                        // Fall through to show new menu at new position
+                                    }
+                                    _ => {}
+                                }
+                            }
+
                             // ── File browser area ──
                             if file_browser.visible && mouse.column < sidebar_w {
+                                // Left-click handling
                                 if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
                                     focus = Focus::FileBrowser;
                                     let header_offset = chrome_y + 2;
@@ -1206,6 +1482,30 @@ pub async fn run(mut cfg: AppConfig, restore_on_launch: bool) -> anyhow::Result<
                                     } else {
                                         file_browser_last_click = None;
                                     }
+                                    continue;
+                                }
+                                
+                                // Right-click handling - show context menu
+                                if let MouseEventKind::Down(MouseButton::Right) = mouse.kind {
+                                    focus = Focus::FileBrowser;
+                                    let header_offset = chrome_y + 2;
+                                    if mouse.row >= header_offset {
+                                        let clicked_idx = file_browser.scroll_offset
+                                            + (mouse.row - header_offset) as usize;
+                                        if clicked_idx < file_browser.entries.len() {
+                                            file_browser.cursor = clicked_idx;
+                                            let entry = &file_browser.entries[clicked_idx];
+                                            let is_parent = entry.name == "..";
+                                            file_browser.context_menu.show(
+                                                mouse.column,
+                                                mouse.row,
+                                                entry.path.clone(),
+                                                entry.is_dir,
+                                                is_parent,
+                                            );
+                                        }
+                                    }
+                                    continue;
                                 }
                                 continue;
                             }
@@ -2018,11 +2318,20 @@ enum PaletteAction {
     Broadcast,
     FileBrowser,
     UterxAi,
+    OpenLastPlugin,
+    LaunchPlugin(String),
     ToggleFloat,
 }
 
 /// Map a command palette entry to a PaletteAction.
 fn palette_action_for(cmd: &CommandEntry) -> Option<PaletteAction> {
+    if let Some(plugin_name) = cmd.label.strip_prefix("Plugin: ") {
+        let name = plugin_name.trim();
+        if !name.is_empty() {
+            return Some(PaletteAction::LaunchPlugin(name.to_string()));
+        }
+    }
+
     match cmd.label.as_str() {
         "New Tab" => Some(PaletteAction::NewTab),
         "Close Tab" => Some(PaletteAction::CloseTab),
@@ -2036,6 +2345,8 @@ fn palette_action_for(cmd: &CommandEntry) -> Option<PaletteAction> {
         "Help" => Some(PaletteAction::Help),
         "File Browser" => Some(PaletteAction::FileBrowser),
         "UterxAI" => Some(PaletteAction::UterxAi),
+        "Open Last Plugin" => Some(PaletteAction::OpenLastPlugin),
+        "Quick Notes" => Some(PaletteAction::LaunchPlugin("quick-notes".to_string())),
         "Toggle Floating" => Some(PaletteAction::ToggleFloat),
         "Quit" => Some(PaletteAction::Quit),
         _ => None,
@@ -2047,11 +2358,14 @@ fn execute_palette_action(
     action: PaletteAction,
     session: &mut Session,
     uterxai: &mut UterxAiRuntime,
+    plugin_runtimes: &mut Vec<GenericPluginRuntime>,
+    last_plugin_name: &mut Option<String>,
     overlay: &mut Overlay,
     file_browser: &mut FileBrowserState,
     focus: &mut Focus,
     terminal: &Terminal<CrosstermBackend<io::Stdout>>,
     shell: &str,
+    plugins_dir: &Path,
     show_tab_bar: bool,
     show_status_bar: bool,
 ) -> bool {
@@ -2075,6 +2389,36 @@ fn execute_palette_action(
         PaletteAction::UterxAi => {
             let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, sidebar_w);
             open_or_focus_uterxai_pane(session, uterxai, area);
+            *last_plugin_name = Some("uterxai".to_string());
+            *focus = Focus::Terminal;
+        }
+        PaletteAction::OpenLastPlugin => {
+            if let Some(name) = last_plugin_name.as_deref() {
+                let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, sidebar_w);
+                if name == "uterxai" {
+                    open_or_focus_uterxai_pane(session, uterxai, area);
+                } else {
+                    open_or_focus_generic_plugin_pane(
+                        session,
+                        plugin_runtimes,
+                        plugins_dir,
+                        name,
+                        area,
+                    );
+                }
+                *focus = Focus::Terminal;
+            }
+        }
+        PaletteAction::LaunchPlugin(plugin_name) => {
+            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, sidebar_w);
+            open_or_focus_generic_plugin_pane(
+                session,
+                plugin_runtimes,
+                plugins_dir,
+                &plugin_name,
+                area,
+            );
+            *last_plugin_name = Some(plugin_name);
             *focus = Focus::Terminal;
         }
         PaletteAction::NewTab => {
@@ -2132,6 +2476,283 @@ fn filter_commands(all: &[CommandEntry], filter: &str) -> Vec<CommandEntry> {
         })
         .cloned()
         .collect()
+}
+
+fn extend_palette_with_installed_plugins(commands: &mut Vec<CommandEntry>, plugins_dir: &Path) {
+    let mut manager = PluginManager::new(plugins_dir.to_path_buf());
+    if manager.scan().is_err() {
+        return;
+    }
+
+    let mut existing_labels: HashSet<String> =
+        commands.iter().map(|c| c.label.to_lowercase()).collect();
+    let mut names: Vec<String> = manager
+        .list()
+        .into_iter()
+        .map(|manifest| manifest.name.clone())
+        .collect();
+    names.sort();
+
+    for name in names {
+        let label = format!("Plugin: {}", name);
+        let key = label.to_lowercase();
+        if existing_labels.contains(&key) {
+            continue;
+        }
+        commands.push(CommandEntry::new(
+            &label,
+            "Ctrl+Shift+P",
+            "Launch or focus plugin pane",
+            uterx_ui::widgets::command_palette::CommandCategory::Plugins,
+        ));
+        existing_labels.insert(key);
+    }
+}
+
+fn installed_plugin_names(plugins_dir: &Path) -> Vec<String> {
+    let mut manager = PluginManager::new(plugins_dir.to_path_buf());
+    if manager.scan().is_err() {
+        return Vec::new();
+    }
+
+    let mut names: Vec<String> = manager
+        .list()
+        .into_iter()
+        .map(|manifest| manifest.name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+fn render_generic_plugin_pane(session: &mut Session, runtime: &GenericPluginRuntime) {
+    let Some(pane_id) = runtime.pane_id else {
+        return;
+    };
+    let Some(tab) = session.active_tab_mut() else {
+        return;
+    };
+    let Some(pane) = tab.panes.iter_mut().find(|pane| pane.id == pane_id) else {
+        return;
+    };
+
+    pane.grid.clear();
+    pane.grid.title = format!("Plugin: {}", runtime.name);
+    append_text_to_grid(&mut pane.grid, &format!("Plugin: {}", runtime.name));
+    append_text_to_grid(&mut pane.grid, &runtime.status);
+    append_text_to_grid(&mut pane.grid, "Output:");
+    for line in &runtime.transcript {
+        append_text_to_grid(&mut pane.grid, line);
+    }
+    append_text_to_grid(&mut pane.grid, &format!("> {}", runtime.prompt_buffer));
+}
+
+fn open_or_focus_generic_plugin_pane(
+    session: &mut Session,
+    runtimes: &mut Vec<GenericPluginRuntime>,
+    plugins_dir: &Path,
+    plugin_name: &str,
+    area: MuxRect,
+) {
+    let runtime_idx = if let Some(idx) = runtimes.iter().position(|r| r.name == plugin_name) {
+        idx
+    } else {
+        runtimes.push(GenericPluginRuntime {
+            name: plugin_name.to_string(),
+            instance: None,
+            pane_id: None,
+            last_io_write_count: 0,
+            prompt_buffer: String::new(),
+            status: format!("Launching {}...", plugin_name),
+            transcript: Vec::new(),
+        });
+        runtimes.len() - 1
+    };
+
+    if let Some(existing_id) = runtimes[runtime_idx].pane_id {
+        if focus_pane_by_id(session, existing_id) {
+            render_generic_plugin_pane(session, &runtimes[runtime_idx]);
+            return;
+        }
+        runtimes[runtime_idx].pane_id = None;
+    }
+
+    if runtimes[runtime_idx].instance.is_none() {
+        let mut manager = PluginManager::new(plugins_dir.to_path_buf());
+        match manager.scan() {
+            Ok(()) => {
+                let manifest = manager.get(plugin_name).cloned();
+                let wasm_path = manager.wasm_path(plugin_name);
+                match (manifest, wasm_path) {
+                    (Some(manifest), Some(wasm_path)) => {
+                        let granted_permissions = manifest.permissions.clone();
+                        match PluginInstance::load(&wasm_path, manifest, granted_permissions) {
+                            Ok(mut instance) => match instance.start() {
+                                Ok(()) => {
+                                    runtimes[runtime_idx].status =
+                                        format!("{} runtime ready", plugin_name);
+                                    runtimes[runtime_idx].instance = Some(instance);
+                                }
+                                Err(err) => {
+                                    runtimes[runtime_idx].status =
+                                        format!("{} start failed: {}", plugin_name, err);
+                                }
+                            },
+                            Err(err) => {
+                                runtimes[runtime_idx].status =
+                                    format!("{} load failed: {}", plugin_name, err);
+                            }
+                        }
+                    }
+                    _ => {
+                        runtimes[runtime_idx].status =
+                            format!("Plugin '{}' not installed", plugin_name);
+                    }
+                }
+            }
+            Err(err) => {
+                runtimes[runtime_idx].status = format!("Plugin scan failed: {}", err);
+            }
+        }
+    }
+
+    let pane_id = uterx_mux::PaneId(session.next_id());
+    let pane_rect = uterx_mux::Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.max(20),
+        height: area.height.max(5),
+    };
+    let mut pane = uterx_mux::Pane::new_bare(pane_id, pane_rect);
+    pane.grid.title = format!("Plugin: {}", plugin_name);
+
+    if let Some(tab) = session.active_tab_mut() {
+        for p in &mut tab.panes {
+            p.focused = false;
+        }
+        pane.focused = true;
+        tab.active_pane = Some(pane_id);
+        tab.add_pane(pane);
+        tab.relayout(area);
+    }
+
+    runtimes[runtime_idx].pane_id = Some(pane_id);
+    render_generic_plugin_pane(session, &runtimes[runtime_idx]);
+}
+
+fn sync_generic_plugin_output_into_panes(
+    session: &mut Session,
+    runtimes: &mut Vec<GenericPluginRuntime>,
+) {
+    for runtime in runtimes.iter_mut() {
+        let Some(instance) = runtime.instance.as_ref() else {
+            continue;
+        };
+        let Some(pane_id) = runtime.pane_id else {
+            continue;
+        };
+
+        let io_calls = instance.io_write_calls();
+        if runtime.last_io_write_count >= io_calls.len() {
+            continue;
+        }
+
+        for call in &io_calls[runtime.last_io_write_count..] {
+            let text = String::from_utf8_lossy(&call.bytes);
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    runtime.transcript.push(trimmed.to_string());
+                }
+            }
+        }
+        runtime.last_io_write_count = io_calls.len();
+
+        if !focus_pane_by_id(session, pane_id) {
+            runtime.pane_id = None;
+            continue;
+        }
+        render_generic_plugin_pane(session, runtime);
+    }
+}
+
+fn plugin_poll_export_name(plugin_name: &str) -> String {
+    format!("{}_poll", plugin_name.replace('-', "_"))
+}
+
+fn call_plugin_poll(instance: &mut PluginInstance, plugin_name: &str) -> anyhow::Result<i32> {
+    let export_name = plugin_poll_export_name(plugin_name);
+    instance
+        .call_i32_func(&export_name)
+        .or_else(|_| instance.call_i32_func("plugin_poll"))
+}
+
+fn handle_generic_plugin_prompt_key(
+    key: &crossterm::event::KeyEvent,
+    session: &mut Session,
+    runtimes: &mut Vec<GenericPluginRuntime>,
+) -> bool {
+    let Some(active_tab) = session.active_tab() else {
+        return false;
+    };
+    let Some(active_pane_id) = active_tab.active_pane else {
+        return false;
+    };
+
+    let Some(runtime_idx) = runtimes
+        .iter()
+        .position(|runtime| runtime.pane_id == Some(active_pane_id))
+    else {
+        return false;
+    };
+
+    let mut consumed = true;
+    {
+        let runtime = &mut runtimes[runtime_idx];
+        match key.code {
+            KeyCode::Enter => {
+                let prompt = runtime.prompt_buffer.trim().to_string();
+                if prompt.is_empty() {
+                    // no-op, keep consumed so Enter doesn't leak to shell
+                } else {
+                    runtime.prompt_buffer.clear();
+                    runtime.transcript.push(format!("> {}", prompt));
+
+                    if let Some(instance) = runtime.instance.as_mut() {
+                        instance.append_stream_input(1, prompt.as_bytes());
+                        instance.append_stream_input(1, b"\n");
+                        if let Err(err) = call_plugin_poll(instance, &runtime.name) {
+                            runtime.transcript.push(format!(
+                                "{} poll failed: {}",
+                                runtime.name, err
+                            ));
+                        }
+                    } else {
+                        runtime
+                            .transcript
+                            .push(format!("{} runtime unavailable", runtime.name));
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                runtime.prompt_buffer.pop();
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                runtime.prompt_buffer.push(c);
+            }
+            _ => {
+                consumed = false;
+            }
+        }
+    }
+
+    if consumed {
+        let runtime = &runtimes[runtime_idx];
+        render_generic_plugin_pane(session, runtime);
+    }
+    consumed
 }
 
 /// Open a file in a floating editor pane.
@@ -2425,4 +3046,236 @@ fn handle_mouse_event(
         MouseEventKind::ScrollDown => {}
         _ => {}
     }
+}
+
+/// Execute a context menu action.
+fn execute_context_menu_action(
+    action: ContextMenuAction,
+    file_browser: &mut FileBrowserState,
+    session: &mut Session,
+    shell: &str,
+    terminal: &Terminal<CrosstermBackend<io::Stdout>>,
+    show_tab_bar: bool,
+    show_status_bar: bool,
+    sidebar_w: u16,
+) {
+    match action {
+        ContextMenuAction::OpenInTerminal => {
+            if let Some(path) = file_browser.context_menu.target_path.clone() {
+                let target_dir = if path.is_dir() {
+                    path
+                } else {
+                    path.parent().unwrap_or(&file_browser.root).to_path_buf()
+                };
+                let _area = compute_pane_area(terminal, show_tab_bar, show_status_bar, sidebar_w);
+                if let Some(tab) = session.active_tab_mut() {
+                    if let Some(pane) = tab.focused_pane_mut() {
+                        // Send cd command to the active pane
+                        let cd_cmd = format!("cd \"{}\"\n", target_dir.display());
+                        let _ = pane.write_to_pty(cd_cmd.as_bytes());
+                    }
+                }
+            }
+        }
+        ContextMenuAction::OpenInNewTab => {
+            if let Some(path) = file_browser.context_menu.target_path.clone() {
+                let target_dir = if path.is_dir() {
+                    path
+                } else {
+                    path.parent().unwrap_or(&file_browser.root).to_path_buf()
+                };
+                let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, sidebar_w);
+                // Create new tab and cd to the target directory
+                if let Ok(_tab_id) = session.create_tab(&shell, area) {
+                    if let Some(tab) = session.active_tab_mut() {
+                        if let Some(pane) = tab.focused_pane_mut() {
+                            let cd_cmd = format!("cd \"{}\"\n", target_dir.display());
+                            let _ = pane.write_to_pty(cd_cmd.as_bytes());
+                        }
+                    }
+                }
+            }
+        }
+        ContextMenuAction::OpenInEditor => {
+            if let Some(path) = file_browser.context_menu.target_path.clone() {
+                if path.is_file() {
+                    let _screen_area = compute_screen_area(terminal, show_tab_bar, show_status_bar, sidebar_w);
+                    // Note: We need editor_panes and focus, but those aren't available here
+                    // For now, open in external editor
+                    open_file_in_external_editor(&path);
+                }
+            }
+        }
+        ContextMenuAction::CopyPath => {
+            if let Some(path) = &file_browser.context_menu.target_path {
+                let path_str = path.to_string_lossy().to_string();
+                // Copy to clipboard - this is platform-specific
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("clip")
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .and_then(|mut child| {
+                            use std::io::Write;
+                            if let Some(stdin) = child.stdin.as_mut() {
+                                let _ = stdin.write_all(path_str.as_bytes());
+                            }
+                            child.wait()
+                        });
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = std::process::Command::new("xclip")
+                        .args(["-selection", "clipboard"])
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .and_then(|mut child| {
+                            use std::io::Write;
+                            if let Some(stdin) = child.stdin.as_mut() {
+                                let _ = stdin.write_all(path_str.as_bytes());
+                            }
+                            child.wait()
+                        });
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("pbcopy")
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .and_then(|mut child| {
+                            use std::io::Write;
+                            if let Some(stdin) = child.stdin.as_mut() {
+                                let _ = stdin.write_all(path_str.as_bytes());
+                            }
+                            child.wait()
+                        });
+                }
+            }
+        }
+        ContextMenuAction::CopyRelativePath => {
+            if let Some(path) = &file_browser.context_menu.target_path {
+                let relative = path.strip_prefix(&file_browser.root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .to_string();
+                // Copy to clipboard
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("clip")
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .and_then(|mut child| {
+                            use std::io::Write;
+                            if let Some(stdin) = child.stdin.as_mut() {
+                                let _ = stdin.write_all(relative.as_bytes());
+                            }
+                            child.wait()
+                        });
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = std::process::Command::new("xclip")
+                        .args(["-selection", "clipboard"])
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .and_then(|mut child| {
+                            use std::io::Write;
+                            if let Some(stdin) = child.stdin.as_mut() {
+                                let _ = stdin.write_all(relative.as_bytes());
+                            }
+                            child.wait()
+                        });
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("pbcopy")
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .and_then(|mut child| {
+                            use std::io::Write;
+                            if let Some(stdin) = child.stdin.as_mut() {
+                                let _ = stdin.write_all(relative.as_bytes());
+                            }
+                            child.wait()
+                        });
+                }
+            }
+        }
+        ContextMenuAction::Rename => {
+            // TODO: Implement rename dialog
+            // For now, we could show an input field
+        }
+        ContextMenuAction::Delete => {
+            if let Some(path) = file_browser.context_menu.target_path.clone() {
+                if path.is_dir() {
+                    let _ = std::fs::remove_dir_all(&path);
+                } else {
+                    let _ = std::fs::remove_file(&path);
+                }
+                file_browser.refresh_root();
+            }
+        }
+        ContextMenuAction::Refresh => {
+            file_browser.refresh_root();
+        }
+        ContextMenuAction::NavigateUp => {
+            if let Some(parent) = file_browser.root.parent() {
+                file_browser.navigate_to(parent.to_path_buf());
+            }
+        }
+        ContextMenuAction::NewFile => {
+            // TODO: Implement new file dialog
+            // Create a new file in the current directory or selected directory
+            if let Some(target_path) = &file_browser.context_menu.target_path {
+                let dir = if target_path.is_dir() {
+                    target_path.clone()
+                } else {
+                    target_path.parent().unwrap_or(&file_browser.root).to_path_buf()
+                };
+                let new_file = dir.join("new_file.txt");
+                let mut counter = 1;
+                let mut final_path = new_file.clone();
+                while final_path.exists() {
+                    final_path = dir.join(format!("new_file_{}.txt", counter));
+                    counter += 1;
+                }
+                let _ = std::fs::File::create(&final_path);
+                file_browser.refresh_root();
+            }
+        }
+        ContextMenuAction::NewFolder => {
+            // TODO: Implement new folder dialog
+            if let Some(target_path) = &file_browser.context_menu.target_path {
+                let dir = if target_path.is_dir() {
+                    target_path.clone()
+                } else {
+                    target_path.parent().unwrap_or(&file_browser.root).to_path_buf()
+                };
+                let mut counter = 1;
+                let mut final_path = dir.join("new_folder");
+                while final_path.exists() {
+                    final_path = dir.join(format!("new_folder_{}", counter));
+                    counter += 1;
+                }
+                let _ = std::fs::create_dir(&final_path);
+                file_browser.refresh_root();
+            }
+        }
+    }
+}
+
+/// Open a file in an external editor.
+fn open_file_in_external_editor(path: &Path) {
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| {
+            #[cfg(target_os = "windows")]
+            { "notepad".to_string() }
+            #[cfg(not(target_os = "windows"))]
+            { "nano".to_string() }
+        });
+    
+    let _ = std::process::Command::new(&editor)
+        .arg(path)
+        .spawn();
 }

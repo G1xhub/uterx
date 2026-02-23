@@ -169,12 +169,10 @@ impl Storage {
 
     /// Delete a note from storage.
     pub fn delete_note(&mut self, id: NoteId) -> Result<bool, StorageError> {
-        let filename = match self.index.remove(id) {
+        let _filename = match self.index.remove(id) {
             Some(f) => f,
             None => return Ok(false),
         };
-
-        let path = self.note_path(&filename);
 
         // Note: uterx_fs may not have a delete function yet
         // For now, we just remove from index and save

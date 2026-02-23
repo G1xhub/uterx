@@ -30,7 +30,6 @@ const C_OVERLAY0: Color = Color::Rgb(108, 112, 134);
 const C_TEXT: Color = Color::Rgb(205, 214, 244);
 const C_SUBTEXT0: Color = Color::Rgb(166, 173, 200);
 const C_BLUE: Color = Color::Rgb(137, 180, 250);
-const C_PINK: Color = Color::Rgb(245, 194, 231);
 const C_GREEN: Color = Color::Rgb(166, 227, 161);
 const C_RED: Color = Color::Rgb(243, 139, 168);
 const C_YELLOW: Color = Color::Rgb(249, 226, 175);
@@ -421,7 +420,6 @@ impl<'a> Widget for EditorWidget<'a> {
         let line_num_w: u16 = 4;
         let gutter_w: u16 = 1;
         let code_x = area.x + line_num_w + gutter_w;
-        let code_w = area.width.saturating_sub(line_num_w + gutter_w);
         let content_h = area.height.saturating_sub(1); // -1 for bottom status bar
 
         // Fill background

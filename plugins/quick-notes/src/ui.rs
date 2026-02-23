@@ -343,7 +343,7 @@ unsafe fn uterx_io_write(_stream_id: i64, _data_ptr: i32, _data_len: i32) -> i32
 }
 
 /// Main plugin run loop.
-pub fn run(manager: NoteManager, storage: Storage) {
+pub fn run(manager: NoteManager, _storage: Storage) {
     // Create overlay
     let pane_id = create_overlay("Quick Notes");
     let mut state = UiState::new(pane_id);
@@ -424,7 +424,7 @@ fn handle_list_input(state: &mut UiState, manager: &NoteManager, input: &[u8]) {
 }
 
 /// Handle input in editor mode.
-fn handle_editor_input(state: &mut UiState, manager: &NoteManager, input: &[u8]) {
+fn handle_editor_input(state: &mut UiState, _manager: &NoteManager, input: &[u8]) {
     match input {
         b"\x1b" => state.exit_to_list(), // Escape
         b"t" => {

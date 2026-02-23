@@ -76,3 +76,14 @@ Diese Plugins machen den Terminal zu einem "Super-Tool", das über reine Kommand
 - **Community**: Fördere Plugin-Entwicklung durch Docs und ein Repo für Beiträge.
 
 Diese Planung bietet eine solide Basis – bei Bedarf kann ich Details zu einem bestimmten Aspekt vertiefen!
+
+### Build-Kommandos (aktueller Stand)
+- **App bauen (default):** `cargo build -p uterx`
+- **Plugins (WASM) bauen:** `cargo run -p xtask -- build-plugins`
+- **App + Plugins kombiniert:** `cargo run -p xtask -- build-all`
+
+Alias-Schreibweisen funktionieren ebenfalls:
+- `cargo run -p xtask -- build plugins` → wie `build-plugins`
+- `cargo run -p xtask -- build all` → wie `build-all`
+
+Hinweis: Für Plugin-WASM-Builds muss das Target `wasm32-wasip1` installiert sein (`rustup target add wasm32-wasip1`).

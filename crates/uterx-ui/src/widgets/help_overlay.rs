@@ -29,6 +29,8 @@ impl HelpOverlay {
                     ("Ctrl+Q", "Quit uterx"),
                     ("F1", "Toggle this help screen"),
                     ("Ctrl+P", "Open command palette"),
+                    ("Ctrl+Shift+P", "Open plugin quick-list overlay"),
+                    ("Ctrl+Shift+L", "Open/focus last plugin"),
                     ("Ctrl+E", "Toggle file browser sidebar"),
                     ("Ctrl+Shift+A", "Open/focus UterxAI pane"),
                 ],

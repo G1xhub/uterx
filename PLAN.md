@@ -217,6 +217,8 @@ uterx/
 - [ ] Bluetooth Messaging
 - [ ] Mesh & WLAN Messaging
 - [ ] Midnight Blockchain Integration
+- [x] Generic plugin launcher in app core (Command Palette + Ctrl+Shift+P quick-list overlay + last-plugin reopen)
+- [x] Quick-notes first consumer wiring (non-blocking startup output in plugin pane)
 - [x] Text/Code Editor — built-in floating editor pane (syntect, modal vim, undo); advanced plugin version (helix + tree-sitter) deferred
 - [ ] File Sharing
 - [ ] Network Tools
@@ -508,3 +510,16 @@ Based on performance impact, implementation complexity, and user value:
 - **Modularity**: Each feature can be developed independently as separate widgets/extensions
 - **Consistency**: All features follow uterx's Catppuccin theme and UX patterns
 - **Extensibility**: Features use existing abstractions (Session, Pane, Widget system)
+
+---
+
+## Build Workflow Notes (2026-02-23)
+
+- Verified canonical commands:
+   - `cargo run -p xtask -- build-all`
+   - `cargo run -p xtask -- build-plugins`
+- Verified alias commands:
+   - `cargo run -p xtask -- build all` (alias for `build-all`)
+   - `cargo run -p xtask -- build plugins` (alias for `build-plugins`)
+- Prerequisite for plugin builds:
+   - `rustup target add wasm32-wasip1`

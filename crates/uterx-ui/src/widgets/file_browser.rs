@@ -12,6 +12,8 @@ use ratatui::{
 };
 use std::path::{Path, PathBuf};
 
+use super::context_menu::ContextMenuState;
+
 /// A single entry in the file browser tree.
 #[derive(Debug, Clone)]
 pub struct FsEntry {
@@ -23,7 +25,7 @@ pub struct FsEntry {
     pub is_symlink: bool,
 }
 
-/// File browser state — tracks cwd, entries, cursor, scroll, and search.
+/// File browser state — tracks cwd, entries, cursor, scroll, search, and context menu.
 #[derive(Debug, Clone)]
 pub struct FileBrowserState {
     pub root: PathBuf,
@@ -41,6 +43,8 @@ pub struct FileBrowserState {
     pub search_results: Vec<usize>,
     pub search_result_paths: Vec<PathBuf>,
     pub search_cursor: usize,
+    // ── Context Menu ──
+    pub context_menu: ContextMenuState,
 }
 
 impl FileBrowserState {
@@ -60,6 +64,7 @@ impl FileBrowserState {
             search_results: Vec::new(),
             search_result_paths: Vec::new(),
             search_cursor: 0,
+            context_menu: ContextMenuState::default(),
         };
         state.refresh_root();
         state
