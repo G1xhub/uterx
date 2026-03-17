@@ -28,6 +28,7 @@ impl CommandEntry {
 /// Returns the default list of commands.
 pub fn default_commands() -> Vec<CommandEntry> {
     vec![
+        // ── Terminal ──────────────────────────────────────────────────────
         CommandEntry::new("New Tab", "Ctrl+T", "Open a new terminal tab"),
         CommandEntry::new("Close Tab", "Ctrl+W", "Close the active tab"),
         CommandEntry::new("Next Tab", "Ctrl+Tab", "Switch to the next tab"),
@@ -37,9 +38,14 @@ pub fn default_commands() -> Vec<CommandEntry> {
         CommandEntry::new("Focus Next Pane", "Alt+Right", "Move focus to next pane"),
         CommandEntry::new("Focus Previous Pane", "Alt+Left", "Move focus to previous pane"),
         CommandEntry::new("Toggle Broadcast", "Alt+B", "Type in all panes simultaneously"),
+        CommandEntry::new("Toggle Floating", "Alt+F", "Float/unfloat focused pane"),
+        // ── Sidebars ─────────────────────────────────────────────────────
         CommandEntry::new("File Browser", "Ctrl+E", "Toggle file explorer sidebar"),
         CommandEntry::new("Search Files", "/", "Search files in explorer (open sidebar first)"),
-        CommandEntry::new("Toggle Floating", "Alt+F", "Float/unfloat focused pane"),
+        CommandEntry::new("AI Sidebar", "Alt+A", "Configure AI providers and API keys"),
+        // ── AI ────────────────────────────────────────────────────────────
+        CommandEntry::new("New AI Chat", "Alt+I", "Launch AI chat in a new terminal pane"),
+        // ── App ───────────────────────────────────────────────────────────
         CommandEntry::new("Help", "F1", "Show help & keybindings"),
         CommandEntry::new("Command Palette", "Ctrl+P", "Open this command palette"),
         CommandEntry::new("Quit", "Ctrl+Q", "Exit uterx"),

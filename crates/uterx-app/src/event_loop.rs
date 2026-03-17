@@ -33,6 +33,7 @@ use ratatui::{
 use std::io;
 use uterx_mux::{Rect as MuxRect, Session};
 use uterx_ui::input::{Action, InputHandler};
+use uterx_ui::widgets::ai_sidebar::{AiProvider as UiAiProvider, AiSidebarField, AiSidebarState, AiSidebarWidget};
 use uterx_ui::widgets::command_palette::{default_commands, CommandEntry, CommandPalette};
 use uterx_ui::widgets::editor::{EditorState, EditorWidget, EditorMode};
 use uterx_ui::widgets::file_browser::{FileBrowserState, FileBrowserWidget};
@@ -54,6 +55,7 @@ enum Overlay {
 enum Focus {
     Terminal,
     FileBrowser,
+    AiSidebar,
     Editor(u64),
 }
 
@@ -137,6 +139,18 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
     let mut file_browser = FileBrowserState::new(&home);
     file_browser.width = 32;
 
+    // AI sidebar state — pre-populate from config
+    let mut ai_sidebar = AiSidebarState::new();
+    {
+        let ui_provider = match cfg.ai.provider {
+            crate::config::AiProvider::Anthropic => UiAiProvider::Anthropic,
+            crate::config::AiProvider::Openai    => UiAiProvider::OpenAi,
+            crate::config::AiProvider::Ollama    => UiAiProvider::Ollama,
+            crate::config::AiProvider::Custom    => UiAiProvider::Custom,
+        };
+        ai_sidebar.load(ui_provider, &cfg.ai.api_key, &cfg.ai.model, &cfg.ai.base_url);
+    }
+
     // Focus state
     let mut focus = Focus::Terminal;
 
@@ -167,6 +181,9 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
         let fb_visible = file_browser.visible;
         let fb_width = file_browser.width;
         let fb_focused = focus == Focus::FileBrowser;
+        let ai_visible = ai_sidebar.visible;
+        let ai_width = ai_sidebar.width;
+        let ai_focused = focus == Focus::AiSidebar;
 
         terminal.draw(|frame| {
             let area = frame.area();
@@ -220,28 +237,50 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                 v_idx += 1;
             }
 
-            // ── Main area (sidebar + terminal) ──
+            // ── Main area (sidebars + terminal) ──
             let main_area = v_chunks[v_idx];
             v_idx += 1;
 
-            // Horizontal split: file browser sidebar + terminal area
-            let (sidebar_area, term_area) = if fb_visible {
-                let h_chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([
-                        Constraint::Length(fb_width),
-                        Constraint::Min(1),
-                    ])
-                    .split(main_area);
-                (Some(h_chunks[0]), h_chunks[1])
-            } else {
-                (None, main_area)
+            // Horizontal split: [file browser] | terminal | [AI sidebar]
+            let (fb_area, term_area, ai_area) = match (fb_visible, ai_visible) {
+                (false, false) => (None, main_area, None),
+                (true, false) => {
+                    let h = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Length(fb_width), Constraint::Min(1)])
+                        .split(main_area);
+                    (Some(h[0]), h[1], None)
+                }
+                (false, true) => {
+                    let h = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Min(1), Constraint::Length(ai_width)])
+                        .split(main_area);
+                    (None, h[0], Some(h[1]))
+                }
+                (true, true) => {
+                    let h = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([
+                            Constraint::Length(fb_width),
+                            Constraint::Min(1),
+                            Constraint::Length(ai_width),
+                        ])
+                        .split(main_area);
+                    (Some(h[0]), h[1], Some(h[2]))
+                }
             };
 
-            // ── File browser sidebar ──
-            if let Some(sb_area) = sidebar_area {
+            // ── File browser sidebar (left) ──
+            if let Some(sb_area) = fb_area {
                 let fb_widget = FileBrowserWidget::new(&file_browser, fb_focused);
                 frame.render_widget(fb_widget, sb_area);
+            }
+
+            // ── AI sidebar (right) ──
+            if let Some(ai_sb_area) = ai_area {
+                let ai_widget = AiSidebarWidget::new(&ai_sidebar, ai_focused);
+                frame.render_widget(ai_widget, ai_sb_area);
             }
 
             // ── Terminal panes ──
@@ -534,6 +573,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                                     &mut session,
                                                     &mut overlay,
                                                     &mut file_browser,
+                                                    &mut ai_sidebar,
                                                     &mut focus,
                                                     &terminal,
                                                     &shell,
@@ -584,14 +624,44 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     } else {
                                         focus = Focus::Terminal;
                                     }
-                                    // Relayout panes for new available width
                                     let area = compute_pane_area(
                                         &terminal,
                                         show_tab_bar,
                                         show_status_bar,
                                         if file_browser.visible { file_browser.width } else { 0 },
+                                        if ai_sidebar.visible { ai_sidebar.width } else { 0 },
                                     );
                                     session.relayout_all(area);
+                                    continue;
+                                }
+                                Action::ToggleAiSidebar => {
+                                    ai_sidebar.toggle();
+                                    if ai_sidebar.visible {
+                                        focus = Focus::AiSidebar;
+                                    } else {
+                                        focus = Focus::Terminal;
+                                    }
+                                    let area = compute_pane_area(
+                                        &terminal,
+                                        show_tab_bar,
+                                        show_status_bar,
+                                        if file_browser.visible { file_browser.width } else { 0 },
+                                        if ai_sidebar.visible { ai_sidebar.width } else { 0 },
+                                    );
+                                    session.relayout_all(area);
+                                    continue;
+                                }
+                                Action::NewAiChat => {
+                                    let ai_w = if ai_sidebar.visible { ai_sidebar.width } else { 0 };
+                                    let area = compute_pane_area(
+                                        &terminal,
+                                        show_tab_bar,
+                                        show_status_bar,
+                                        if file_browser.visible { file_browser.width } else { 0 },
+                                        ai_w,
+                                    );
+                                    spawn_ai_chat_pane(&mut session, &ai_sidebar, area);
+                                    focus = Focus::Terminal;
                                     continue;
                                 }
                                 _ => {
@@ -630,7 +700,8 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                             } else {
                                                 // Open file in editor
                                                 let screen_area = compute_screen_area(&terminal, show_tab_bar, show_status_bar,
-                                                    if file_browser.visible { file_browser.width } else { 0 });
+                                                    if file_browser.visible { file_browser.width } else { 0 },
+                                                    if ai_sidebar.visible  { ai_sidebar.width   } else { 0 });
                                                 open_file_in_editor(&p, screen_area, &mut editor_panes, &mut next_editor_id, &mut focus);
                                             }
                                         }
@@ -669,7 +740,8 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                             // ── Open file in editor ──
                                             let path = entry.path.clone();
                                             let screen_area = compute_screen_area(&terminal, show_tab_bar, show_status_bar,
-                                                if file_browser.visible { file_browser.width } else { 0 });
+                                                if file_browser.visible { file_browser.width } else { 0 },
+                                                if ai_sidebar.visible  { ai_sidebar.width   } else { 0 });
                                             open_file_in_editor(&path, screen_area, &mut editor_panes, &mut next_editor_id, &mut focus);
                                         }
                                     }
@@ -684,6 +756,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                                 show_tab_bar,
                                                 show_status_bar,
                                                 file_browser.width,
+                                                if ai_sidebar.visible { ai_sidebar.width } else { 0 },
                                             );
                                             open_folder_in_pane(
                                                 &mut session,
@@ -711,6 +784,119 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                 }
                                 KeyCode::Char('/') => {
                                     file_browser.enter_search();
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
+                        // ── AI sidebar focused input ──
+                        if focus == Focus::AiSidebar && ai_sidebar.visible {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    // Close AI sidebar, return focus to terminal
+                                    ai_sidebar.visible = false;
+                                    focus = Focus::Terminal;
+                                    let area = compute_pane_area(
+                                        &terminal,
+                                        show_tab_bar,
+                                        show_status_bar,
+                                        if file_browser.visible { file_browser.width } else { 0 },
+                                        0,
+                                    );
+                                    session.relayout_all(area);
+                                }
+                                KeyCode::Tab => ai_sidebar.focus_next(),
+                                KeyCode::BackTab => ai_sidebar.focus_prev(),
+                                KeyCode::Up => {
+                                    if matches!(ai_sidebar.focused_field, AiSidebarField::Provider(_)) {
+                                        ai_sidebar.focus_prev();
+                                    } else {
+                                        ai_sidebar.focus_prev();
+                                    }
+                                }
+                                KeyCode::Down => ai_sidebar.focus_next(),
+                                KeyCode::Left => {
+                                    if matches!(ai_sidebar.focused_field, AiSidebarField::Provider(_)) {
+                                        ai_sidebar.provider_left();
+                                    }
+                                }
+                                KeyCode::Right => {
+                                    if matches!(ai_sidebar.focused_field, AiSidebarField::Provider(_)) {
+                                        ai_sidebar.provider_right();
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    match ai_sidebar.focused_field.clone() {
+                                        AiSidebarField::SaveButton => {
+                                            // Sync sidebar state → config → persist
+                                            cfg.ai.provider = match ai_sidebar.provider {
+                                                UiAiProvider::Anthropic => crate::config::AiProvider::Anthropic,
+                                                UiAiProvider::OpenAi    => crate::config::AiProvider::Openai,
+                                                UiAiProvider::Ollama    => crate::config::AiProvider::Ollama,
+                                                UiAiProvider::Custom    => crate::config::AiProvider::Custom,
+                                            };
+                                            cfg.ai.api_key   = ai_sidebar.api_key.clone();
+                                            cfg.ai.model     = ai_sidebar.model.clone();
+                                            cfg.ai.base_url  = ai_sidebar.base_url.clone();
+                                            match cfg.save() {
+                                                Ok(_) => {
+                                                    ai_sidebar.dirty = false;
+                                                    ai_sidebar.status_msg = Some("Saved!".to_string());
+                                                }
+                                                Err(e) => {
+                                                    ai_sidebar.status_msg = Some(format!("Error: {}", e));
+                                                }
+                                            }
+                                        }
+                                        AiSidebarField::StartChatButton => {
+                                            let ai_w = ai_sidebar.width;
+                                            let area = compute_pane_area(
+                                                &terminal,
+                                                show_tab_bar,
+                                                show_status_bar,
+                                                if file_browser.visible { file_browser.width } else { 0 },
+                                                ai_w,
+                                            );
+                                            spawn_ai_chat_pane(&mut session, &ai_sidebar, area);
+                                            ai_sidebar.visible = false;
+                                            focus = Focus::Terminal;
+                                            let area2 = compute_pane_area(
+                                                &terminal,
+                                                show_tab_bar,
+                                                show_status_bar,
+                                                if file_browser.visible { file_browser.width } else { 0 },
+                                                0,
+                                            );
+                                            session.relayout_all(area2);
+                                        }
+                                        AiSidebarField::Provider(i) => {
+                                            ai_sidebar.provider = uterx_ui::widgets::ai_sidebar::AiProvider::from_index(i);
+                                            ai_sidebar.dirty = true;
+                                        }
+                                        _ => {
+                                            // Move to next field on Enter for text inputs
+                                            ai_sidebar.focus_next();
+                                        }
+                                    }
+                                }
+                                KeyCode::Backspace => ai_sidebar.pop_char(),
+                                KeyCode::Char(c) => {
+                                    // Ctrl+W = close sidebar
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'w' {
+                                        ai_sidebar.visible = false;
+                                        focus = Focus::Terminal;
+                                        let area = compute_pane_area(
+                                            &terminal,
+                                            show_tab_bar,
+                                            show_status_bar,
+                                            if file_browser.visible { file_browser.width } else { 0 },
+                                            0,
+                                        );
+                                        session.relayout_all(area);
+                                    } else {
+                                        ai_sidebar.push_char(c);
+                                    }
                                 }
                                 _ => {}
                             }
@@ -805,6 +991,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     let area = compute_pane_area(
                                         &terminal, show_tab_bar, show_status_bar,
                                         if file_browser.visible { file_browser.width } else { 0 },
+                                        if ai_sidebar.visible  { ai_sidebar.width   } else { 0 },
                                     );
                                     if let Err(e) = session.create_tab(&shell, area) {
                                         tracing::error!("failed to create tab: {}", e);
@@ -822,6 +1009,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     let area = compute_pane_area(
                                         &terminal, show_tab_bar, show_status_bar,
                                         if file_browser.visible { file_browser.width } else { 0 },
+                                        if ai_sidebar.visible  { ai_sidebar.width   } else { 0 },
                                     );
                                     if let Some(tab) = session.active_tab_mut() {
                                         tab.relayout(area);
@@ -837,6 +1025,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     let area = compute_pane_area(
                                         &terminal, show_tab_bar, show_status_bar,
                                         if file_browser.visible { file_browser.width } else { 0 },
+                                        if ai_sidebar.visible  { ai_sidebar.width   } else { 0 },
                                     );
                                     if let Some(tab) = session.active_tab_mut() {
                                         tab.relayout(area);
@@ -863,6 +1052,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                         let area = compute_pane_area(
                                             &terminal, show_tab_bar, show_status_bar,
                                             if file_browser.visible { file_browser.width } else { 0 },
+                                            if ai_sidebar.visible  { ai_sidebar.width   } else { 0 },
                                         );
                                         if let Some(tab) = session.active_tab_mut() {
                                             tab.relayout(area);
@@ -888,6 +1078,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     let area = compute_pane_area(
                                         &terminal, show_tab_bar, show_status_bar,
                                         if file_browser.visible { file_browser.width } else { 0 },
+                                        if ai_sidebar.visible  { ai_sidebar.width   } else { 0 },
                                     );
                                     if let Some(tab) = session.active_tab_mut() {
                                         tab.toggle_float(area);
@@ -903,7 +1094,8 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                 }
                                 // Already handled above
                                 Action::Quit | Action::ShowHelp | Action::CommandPalette
-                                | Action::ToggleFileBrowser | Action::OpenFolder(_) => {}
+                                | Action::ToggleFileBrowser | Action::ToggleAiSidebar
+                                | Action::NewAiChat | Action::OpenFolder(_) => {}
                             }
                         } else {
                             // Forward key to active pane
@@ -916,13 +1108,14 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                         }
                     }
                     Event::Resize(w, h) => {
-                        let sidebar_w = if file_browser.visible { file_browser.width } else { 0 };
+                        let left_w  = if file_browser.visible { file_browser.width } else { 0 };
+                        let right_w = if ai_sidebar.visible   { ai_sidebar.width   } else { 0 };
                         let chrome_rows: u16 =
                             if show_tab_bar { 1 } else { 0 } + if show_status_bar { 1 } else { 0 };
                         let area = MuxRect {
                             x: 0,
                             y: 0,
-                            width: w.saturating_sub(sidebar_w),
+                            width: w.saturating_sub(left_w + right_w),
                             height: h.saturating_sub(chrome_rows),
                         };
                         session.relayout_all(area);
@@ -930,6 +1123,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                     Event::Mouse(mouse) => {
                         if overlay == Overlay::None {
                             let sidebar_w = if file_browser.visible { file_browser.width } else { 0 };
+                            let ai_right_w = if ai_sidebar.visible { ai_sidebar.width } else { 0 };
                             let chrome_y = if show_tab_bar { 1u16 } else { 0 };
 
                             // ── Handle active drag of a floating pane ──
@@ -983,7 +1177,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
 
                                     // [+] button: columns plus_x..plus_x+5
                                     if mouse.column >= plus_x && mouse.column < plus_x + 5 {
-                                        let area = compute_pane_area(&terminal, show_tab_bar, show_status_bar, sidebar_w);
+                                        let area = compute_pane_area(&terminal, show_tab_bar, show_status_bar, sidebar_w, ai_right_w);
                                         let _ = session.create_tab(&shell, area);
                                     // [?] button: columns help_x..help_x+5
                                     } else if mouse.column >= help_x && mouse.column < help_x + 5 {
@@ -1008,7 +1202,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                 continue;
                             }
 
-                            // ── File browser area ──
+                            // ── File browser area (left) ──
                             if file_browser.visible && mouse.column < sidebar_w {
                                 if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
                                     focus = Focus::FileBrowser;
@@ -1020,6 +1214,15 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                             file_browser.cursor = clicked_idx;
                                         }
                                     }
+                                }
+                                continue;
+                            }
+
+                            // ── AI sidebar area (right) ──
+                            let term_width = terminal.size().map(|s| s.width).unwrap_or(80);
+                            if ai_sidebar.visible && mouse.column >= term_width.saturating_sub(ai_right_w) {
+                                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                                    focus = Focus::AiSidebar;
                                 }
                                 continue;
                             }
@@ -1150,6 +1353,8 @@ enum PaletteAction {
     Broadcast,
     FileBrowser,
     ToggleFloat,
+    AiSidebar,
+    NewAiChat,
 }
 
 /// Map a command palette entry to a PaletteAction.
@@ -1167,24 +1372,29 @@ fn palette_action_for(cmd: &CommandEntry) -> Option<PaletteAction> {
         "Help" => Some(PaletteAction::Help),
         "File Browser" => Some(PaletteAction::FileBrowser),
         "Toggle Floating" => Some(PaletteAction::ToggleFloat),
+        "AI Sidebar" => Some(PaletteAction::AiSidebar),
+        "New AI Chat" => Some(PaletteAction::NewAiChat),
         "Quit" => Some(PaletteAction::Quit),
         _ => None,
     }
 }
 
 /// Execute a command palette action. Returns true if the app should quit.
+#[allow(clippy::too_many_arguments)]
 fn execute_palette_action(
     action: PaletteAction,
     session: &mut Session,
     overlay: &mut Overlay,
     file_browser: &mut FileBrowserState,
+    ai_sidebar: &mut AiSidebarState,
     focus: &mut Focus,
     terminal: &Terminal<CrosstermBackend<io::Stdout>>,
     shell: &str,
     show_tab_bar: bool,
     show_status_bar: bool,
 ) -> bool {
-    let sidebar_w = if file_browser.visible { file_browser.width } else { 0 };
+    let left_w  = if file_browser.visible { file_browser.width } else { 0 };
+    let right_w = if ai_sidebar.visible   { ai_sidebar.width   } else { 0 };
     match action {
         PaletteAction::Quit => return true,
         PaletteAction::Help => {
@@ -1197,12 +1407,28 @@ fn execute_palette_action(
             } else {
                 *focus = Focus::Terminal;
             }
-            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar,
-                if file_browser.visible { file_browser.width } else { 0 });
+            let left = if file_browser.visible { file_browser.width } else { 0 };
+            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left, right_w);
             session.relayout_all(area);
         }
+        PaletteAction::AiSidebar => {
+            ai_sidebar.toggle();
+            if ai_sidebar.visible {
+                *focus = Focus::AiSidebar;
+            } else {
+                *focus = Focus::Terminal;
+            }
+            let right = if ai_sidebar.visible { ai_sidebar.width } else { 0 };
+            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left_w, right);
+            session.relayout_all(area);
+        }
+        PaletteAction::NewAiChat => {
+            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left_w, right_w);
+            spawn_ai_chat_pane(session, ai_sidebar, area);
+            *focus = Focus::Terminal;
+        }
         PaletteAction::NewTab => {
-            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, sidebar_w);
+            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left_w, right_w);
             let _ = session.create_tab(shell, area);
         }
         PaletteAction::CloseTab => {
@@ -1214,13 +1440,13 @@ fn execute_palette_action(
         PaletteAction::NextTab => session.next_tab(),
         PaletteAction::PrevTab => session.prev_tab(),
         PaletteAction::SplitVertical => {
-            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, sidebar_w);
+            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left_w, right_w);
             if let Some(tab) = session.active_tab_mut() { tab.relayout(area); }
             let _ = session.split_vertical(shell);
             if let Some(tab) = session.active_tab_mut() { tab.relayout(area); }
         }
         PaletteAction::SplitHorizontal => {
-            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, sidebar_w);
+            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left_w, right_w);
             if let Some(tab) = session.active_tab_mut() { tab.relayout(area); }
             let _ = session.split_horizontal(shell);
             if let Some(tab) = session.active_tab_mut() { tab.relayout(area); }
@@ -1235,7 +1461,7 @@ fn execute_palette_action(
             if let Some(tab) = session.active_tab_mut() { tab.toggle_broadcast(); }
         }
         PaletteAction::ToggleFloat => {
-            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, sidebar_w);
+            let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left_w, right_w);
             if let Some(tab) = session.active_tab_mut() { tab.toggle_float(area); }
         }
     }
@@ -1316,20 +1542,22 @@ fn open_folder_in_pane(
     }
 }
 
-/// Compute the pane area accounting for chrome and sidebar.
+/// Compute the pane area accounting for chrome and both sidebars.
 fn compute_pane_area(
     terminal: &Terminal<CrosstermBackend<io::Stdout>>,
     show_tab_bar: bool,
     show_status_bar: bool,
-    sidebar_width: u16,
+    left_sidebar_width: u16,
+    right_sidebar_width: u16,
 ) -> MuxRect {
     let size = terminal.size().unwrap_or_default();
     let chrome_rows: u16 =
         if show_tab_bar { 1 } else { 0 } + if show_status_bar { 1 } else { 0 };
+    let total_sidebar = left_sidebar_width.saturating_add(right_sidebar_width);
     MuxRect {
         x: 0,
         y: 0,
-        width: size.width.saturating_sub(sidebar_width),
+        width: size.width.saturating_sub(total_sidebar),
         height: size.height.saturating_sub(chrome_rows),
     }
 }
@@ -1339,16 +1567,41 @@ fn compute_screen_area(
     terminal: &Terminal<CrosstermBackend<io::Stdout>>,
     show_tab_bar: bool,
     show_status_bar: bool,
-    sidebar_width: u16,
+    left_sidebar_width: u16,
+    right_sidebar_width: u16,
 ) -> ratatui::layout::Rect {
     let size = terminal.size().unwrap_or_default();
     let chrome_y: u16 = if show_tab_bar { 1 } else { 0 };
     let chrome_bot: u16 = if show_status_bar { 1 } else { 0 };
+    let total_sidebar = left_sidebar_width.saturating_add(right_sidebar_width);
     ratatui::layout::Rect {
-        x: sidebar_width,
+        x: left_sidebar_width,
         y: chrome_y,
-        width: size.width.saturating_sub(sidebar_width),
+        width: size.width.saturating_sub(total_sidebar),
         height: size.height.saturating_sub(chrome_y + chrome_bot),
+    }
+}
+
+/// Spawn a new terminal pane/tab running the configured AI chat command.
+fn spawn_ai_chat_pane(session: &mut Session, ai_sidebar: &AiSidebarState, area: MuxRect) {
+    let chat_cmd = ai_sidebar.build_chat_command();
+    // Wrap in a shell so we can use env exports + logical-or fallback
+    let shell_cmd = format!("bash -c \"{}\"", chat_cmd.replace('"', "\\\""));
+    // Try to create a tab; fall back to running the command in the current tab
+    let model = if ai_sidebar.model.is_empty() {
+        ai_sidebar.provider.default_model().to_string()
+    } else {
+        ai_sidebar.model.clone()
+    };
+    let tab_name = format!("AI:{}", model);
+    if let Ok(tab_id) = session.create_tab(&shell_cmd, area) {
+        if let Some(tab) = session.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.name = tab_name.clone();
+            if let Some(pane) = tab.focused_pane_mut() {
+                pane.grid.title = tab_name;
+            }
+        }
+        session.active_tab = Some(tab_id);
     }
 }
 
