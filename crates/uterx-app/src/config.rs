@@ -13,6 +13,40 @@ pub struct AppConfig {
     pub ui: UiConfig,
     /// Plugin settings.
     pub plugins: PluginConfig,
+    /// AI/LLM settings.
+    pub ai: AiConfig,
+}
+
+/// AI provider selection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AiProvider {
+    Anthropic,
+    Openai,
+    Ollama,
+    Custom,
+}
+
+impl Default for AiProvider {
+    fn default() -> Self {
+        Self::Anthropic
+    }
+}
+
+/// AI/LLM configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiConfig {
+    /// AI provider: "anthropic", "openai", "ollama", "custom".
+    pub provider: AiProvider,
+    /// API key for cloud providers (stored in config — use keyring plugin for production).
+    pub api_key: String,
+    /// Model name (e.g., "claude-opus-4-6", "gpt-4o", "llama3.2").
+    pub model: String,
+    /// Base URL for Ollama or custom OpenAI-compatible endpoints.
+    pub base_url: String,
+    /// CLI tool to launch for AI chat (auto-detected if empty).
+    pub chat_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,12 +84,25 @@ pub struct PluginConfig {
     pub auto_update: bool,
 }
 
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            provider: AiProvider::Anthropic,
+            api_key: String::new(),
+            model: "claude-opus-4-6".to_string(),
+            base_url: String::new(),
+            chat_command: String::new(),
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             terminal: TerminalConfig::default(),
             ui: UiConfig::default(),
             plugins: PluginConfig::default(),
+            ai: AiConfig::default(),
         }
     }
 }
@@ -142,6 +189,21 @@ impl AppConfig {
             .shell
             .clone()
             .unwrap_or_else(|| uterx_platform::shell::default_shell())
+    }
+
+    /// Save the current config to disk.
+    pub fn save(&self) -> anyhow::Result<()> {
+        let config_path = Self::default_config_path();
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let toml_str = toml::to_string_pretty(self)?;
+        let header = "# uterx configuration\n\
+                      # Edit this file to customize your terminal.\n\
+                      # See PLAN.md for documentation.\n\n";
+        std::fs::write(&config_path, format!("{}{}", header, toml_str))?;
+        tracing::info!("config saved to {}", config_path.display());
+        Ok(())
     }
 
     /// Check if this is the first launch (tutorial not yet shown).

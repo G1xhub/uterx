@@ -26,6 +26,10 @@ pub enum Action {
     CommandPalette,
     /// Toggle file browser sidebar.
     ToggleFileBrowser,
+    /// Toggle AI configuration sidebar.
+    ToggleAiSidebar,
+    /// Launch a new AI chat pane (without opening the sidebar first).
+    NewAiChat,
     /// Toggle focused pane between tiled and floating.
     ToggleFloat,
     /// Open a folder in a new pane (cd into it).
@@ -130,6 +134,16 @@ impl InputHandler {
         bindings.insert(
             KeyBinding { code: KeyCode::Char('f'), modifiers: KeyModifiers::ALT },
             Action::ToggleFloat,
+        );
+        // Alt+A = Toggle AI sidebar
+        bindings.insert(
+            KeyBinding { code: KeyCode::Char('a'), modifiers: KeyModifiers::ALT },
+            Action::ToggleAiSidebar,
+        );
+        // Alt+I = New AI chat pane (quick-launch without sidebar)
+        bindings.insert(
+            KeyBinding { code: KeyCode::Char('i'), modifiers: KeyModifiers::ALT },
+            Action::NewAiChat,
         );
 
         Self { bindings }
