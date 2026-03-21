@@ -1,8 +1,8 @@
 //! Tab management — each tab contains one or more panes in a layout.
 
-use serde::{Deserialize, Serialize};
 use crate::layout::Layout;
 use crate::pane::{Pane, PaneId, Rect};
+use serde::{Deserialize, Serialize};
 
 /// Unique identifier for a tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -125,7 +125,8 @@ impl Tab {
         if self.panes.is_empty() {
             return;
         }
-        let current_idx = self.active_pane
+        let current_idx = self
+            .active_pane
             .and_then(|id| self.panes.iter().position(|p| p.id == id))
             .unwrap_or(0);
         let next_idx = (current_idx + 1) % self.panes.len();
@@ -143,7 +144,8 @@ impl Tab {
         if self.panes.is_empty() {
             return;
         }
-        let current_idx = self.active_pane
+        let current_idx = self
+            .active_pane
             .and_then(|id| self.panes.iter().position(|p| p.id == id))
             .unwrap_or(0);
         let prev_idx = if current_idx == 0 {
@@ -192,9 +194,13 @@ impl Tab {
         if self.broadcast {
             for pane in &mut self.panes {
                 pane.write_to_pty(data)?;
+                // Reset scrollback when user types
+                pane.scrollback_offset = 0;
             }
         } else if let Some(pane) = self.focused_pane_mut() {
             pane.write_to_pty(data)?;
+            // Reset scrollback when user types
+            pane.scrollback_offset = 0;
         }
         Ok(())
     }
@@ -221,7 +227,12 @@ impl Tab {
                 let fh = (area.height as f32 * 0.6) as u16;
                 let fx = area.x + (area.width.saturating_sub(fw)) / 2;
                 let fy = area.y + (area.height.saturating_sub(fh)) / 2;
-                let float_rect = Rect { x: fx, y: fy, width: fw, height: fh };
+                let float_rect = Rect {
+                    x: fx,
+                    y: fy,
+                    width: fw,
+                    height: fh,
+                };
                 pane.resize(float_rect);
             }
         }
@@ -241,7 +252,11 @@ impl Tab {
 
     /// Move a floating pane to an absolute position.
     pub fn move_floating_pane(&mut self, pane_id: PaneId, x: u16, y: u16) {
-        if let Some(pane) = self.panes.iter_mut().find(|p| p.id == pane_id && p.is_floating) {
+        if let Some(pane) = self
+            .panes
+            .iter_mut()
+            .find(|p| p.id == pane_id && p.is_floating)
+        {
             pane.rect.x = x;
             pane.rect.y = y;
         }
@@ -254,7 +269,12 @@ mod tests {
     use crate::pane::Pane;
 
     fn make_rect() -> Rect {
-        Rect { x: 0, y: 0, width: 80, height: 24 }
+        Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        }
     }
 
     #[test]
@@ -336,11 +356,34 @@ mod tests {
     #[test]
     fn test_relayout() {
         let mut tab = Tab::new(TabId(1), "test".into());
-        tab.add_pane(Pane::new_bare(PaneId(1), Rect { x: 0, y: 0, width: 40, height: 12 }));
-        tab.add_pane(Pane::new_bare(PaneId(2), Rect { x: 0, y: 0, width: 40, height: 12 }));
-        tab.layout = Layout::VerticalSplit { ratios: vec![0.5, 0.5] };
+        tab.add_pane(Pane::new_bare(
+            PaneId(1),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 12,
+            },
+        ));
+        tab.add_pane(Pane::new_bare(
+            PaneId(2),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 12,
+            },
+        ));
+        tab.layout = Layout::VerticalSplit {
+            ratios: vec![0.5, 0.5],
+        };
 
-        let area = Rect { x: 0, y: 0, width: 100, height: 30 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 30,
+        };
         tab.relayout(area);
 
         assert_eq!(tab.panes[0].rect.width, 50);

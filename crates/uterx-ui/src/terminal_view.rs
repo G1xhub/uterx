@@ -12,6 +12,7 @@ use uterx_core::Grid;
 pub struct TerminalView<'a> {
     grid: &'a Grid,
     show_cursor: bool,
+    scrollback_offset: usize,
 }
 
 impl<'a> TerminalView<'a> {
@@ -19,11 +20,18 @@ impl<'a> TerminalView<'a> {
         Self {
             grid,
             show_cursor: true,
+            scrollback_offset: 0,
         }
     }
 
     pub fn show_cursor(mut self, show: bool) -> Self {
         self.show_cursor = show;
+        self
+    }
+
+    /// Set scrollback offset — how many lines to scroll up from the current screen.
+    pub fn scrollback_offset(mut self, offset: usize) -> Self {
+        self.scrollback_offset = offset;
         self
     }
 }
@@ -32,10 +40,31 @@ impl<'a> Widget for TerminalView<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let rows = (area.height as usize).min(self.grid.rows());
         let cols = (area.width as usize).min(self.grid.cols());
+        let scrollback = &self.grid.scrollback;
+        let scrollback_len = scrollback.len();
 
         for row in 0..rows {
             for col in 0..cols {
-                if let Some(cell) = self.grid.cell(row, col) {
+                let cell_opt = if self.scrollback_offset > 0 {
+                    // Showing scrollback history
+                    let scrollback_row =
+                        scrollback_len.saturating_sub(self.scrollback_offset) + row;
+                    if scrollback_row < scrollback_len {
+                        // Get cell from scrollback
+                        scrollback
+                            .line(scrollback_row)
+                            .and_then(|line| line.get(col))
+                    } else {
+                        // We've scrolled past scrollback, show current grid
+                        let grid_row = scrollback_row - scrollback_len;
+                        self.grid.cell(grid_row, col)
+                    }
+                } else {
+                    // Normal rendering - current screen only
+                    self.grid.cell(row, col)
+                };
+
+                if let Some(cell) = cell_opt {
                     let ch = cell.content.chars().next().unwrap_or(' ');
                     let style = convert_style(&cell.attrs);
 
@@ -49,8 +78,8 @@ impl<'a> Widget for TerminalView<'a> {
             }
         }
 
-        // Draw cursor
-        if self.show_cursor {
+        // Draw cursor (only if not scrolling through history)
+        if self.show_cursor && self.scrollback_offset == 0 {
             let cx = area.x + self.grid.cursor_col as u16;
             let cy = area.y + self.grid.cursor_row as u16;
             if cx < area.x + area.width && cy < area.y + area.height {

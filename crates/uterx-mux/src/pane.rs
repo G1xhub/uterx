@@ -29,6 +29,8 @@ pub struct Pane {
     pub focused: bool,
     /// If true, this pane is floating (absolute position, rendered on top).
     pub is_floating: bool,
+    /// Scrollback offset — 0 means show current screen, >0 means scroll up that many lines.
+    pub scrollback_offset: usize,
     /// PTY process — owns the writer and master handle.
     pty: Option<PtyProcess>,
     /// Channel receiving output from the PTY reader task.
@@ -72,6 +74,7 @@ impl Pane {
             parser,
             focused: false,
             is_floating: false,
+            scrollback_offset: 0,
             pty: Some(pty),
             pty_rx: Some(rx),
         })
@@ -88,6 +91,7 @@ impl Pane {
             parser: Parser::new(),
             focused: false,
             is_floating: false,
+            scrollback_offset: 0,
             pty: None,
             pty_rx: None,
         }

@@ -14,33 +14,38 @@
 
 use crate::config::AppConfig;
 use crossterm::{
+    ExecutableCommand,
     event::{
-        Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
-        EnableMouseCapture, DisableMouseCapture,
+        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEventKind,
     },
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
 };
 use futures::StreamExt;
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::Span,
     widgets::{Block, Borders},
-    Terminal,
 };
+use std::collections::VecDeque;
 use std::io;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use uterx_mux::{Rect as MuxRect, Session};
+use uterx_ui::TerminalView;
 use uterx_ui::input::{Action, InputHandler};
-use uterx_ui::widgets::ai_sidebar::{AiProvider as UiAiProvider, AiSidebarField, AiSidebarState, AiSidebarWidget};
-use uterx_ui::widgets::command_palette::{default_commands, CommandEntry, CommandPalette};
-use uterx_ui::widgets::editor::{EditorState, EditorWidget, EditorMode};
+use uterx_ui::widgets::ai_sidebar::{
+    AiProvider as UiAiProvider, AiSidebarField, AiSidebarState, AiSidebarWidget,
+};
+use uterx_ui::widgets::command_palette::{CommandEntry, CommandPalette, default_commands};
+use uterx_ui::widgets::editor::{EditorMode, EditorState, EditorWidget};
 use uterx_ui::widgets::file_browser::{FileBrowserState, FileBrowserWidget};
 use uterx_ui::widgets::help_overlay::HelpOverlay;
 use uterx_ui::widgets::status_bar::StatusBar;
 use uterx_ui::widgets::tab_bar::{TabBar, TabInfo};
-use uterx_ui::TerminalView;
 
 /// UI overlay state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +84,27 @@ struct DragState {
 struct EditorDragState {
     editor_id: u64,
     offset_x: u16,
+}
+
+/// Transient notification shown in the status bar.
+struct Notification {
+    msg: String,
+    created: Instant,
+    duration: Duration,
+}
+
+impl Notification {
+    fn new(msg: String, duration_ms: u64) -> Self {
+        Self {
+            msg,
+            created: Instant::now(),
+            duration: Duration::from_millis(duration_ms),
+        }
+    }
+
+    fn expired(&self) -> bool {
+        Instant::now().duration_since(self.created) >= self.duration
+    }
 }
 
 /// Run the main terminal event loop.
@@ -131,6 +157,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
     let mut palette_selected: usize = 0;
     let mut palette_filter = String::new();
     let mut filtered_commands: Vec<CommandEntry> = commands.clone();
+    let mut recent_commands: VecDeque<String> = VecDeque::new(); // Track recently used commands
 
     // File browser state
     let home = std::env::var("USERPROFILE")
@@ -138,17 +165,25 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
         .unwrap_or_else(|_| ".".to_string());
     let mut file_browser = FileBrowserState::new(&home);
     file_browser.width = 32;
+    file_browser.load_preview();
 
     // AI sidebar state — pre-populate from config
     let mut ai_sidebar = AiSidebarState::new();
     {
         let ui_provider = match cfg.ai.provider {
             crate::config::AiProvider::Anthropic => UiAiProvider::Anthropic,
-            crate::config::AiProvider::Openai    => UiAiProvider::OpenAi,
-            crate::config::AiProvider::Ollama    => UiAiProvider::Ollama,
-            crate::config::AiProvider::Custom    => UiAiProvider::Custom,
+            crate::config::AiProvider::Openai => UiAiProvider::OpenAi,
+            crate::config::AiProvider::Ollama => UiAiProvider::Ollama,
+            crate::config::AiProvider::Custom => UiAiProvider::Custom,
+            crate::config::AiProvider::Zai => UiAiProvider::ZAi,
+            crate::config::AiProvider::Kimi => UiAiProvider::Kimi,
         };
-        ai_sidebar.load(ui_provider, &cfg.ai.api_key, &cfg.ai.model, &cfg.ai.base_url);
+        ai_sidebar.load(
+            ui_provider,
+            &cfg.ai.api_key,
+            &cfg.ai.model,
+            &cfg.ai.base_url,
+        );
     }
 
     // Focus state
@@ -161,6 +196,22 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
     let mut editor_panes: Vec<EditorPane> = Vec::new();
     let mut next_editor_id: u64 = 1;
     let mut editor_dragging: Option<EditorDragState> = None;
+
+    // Notifications (transient messages displayed in status bar)
+    let mut notifications: VecDeque<Notification> = VecDeque::new();
+
+    // Helper function to push a notification into the queue.
+    // We use an inner function (not a closure) to avoid borrow checker issues.
+    fn push_notification(notifications: &mut VecDeque<Notification>, msg: String, dur_ms: u64) {
+        notifications.push_front(Notification::new(msg, dur_ms));
+        // keep a small history (e.g., 6)
+        while notifications.len() > 6 {
+            notifications.pop_back();
+        }
+    }
+
+    // Channel for async test connection results
+    let (test_tx, mut test_rx) = mpsc::unbounded_channel::<String>();
 
     // crossterm event stream
     let mut event_stream = EventStream::new();
@@ -176,6 +227,11 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
     loop {
         // Process PTY output for all panes
         session.process_all_pty_output();
+
+        // Prune expired notifications before rendering so status area stays up-to-date.
+        while notifications.front().map_or(false, |n| n.expired()) {
+            notifications.pop_front();
+        }
 
         // Render
         let fb_visible = file_browser.visible;
@@ -207,10 +263,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
 
             // ── Tab bar ──
             if show_tab_bar {
-                let broadcast = session
-                    .active_tab()
-                    .map(|t| t.broadcast)
-                    .unwrap_or(false);
+                let broadcast = session.active_tab().map(|t| t.broadcast).unwrap_or(false);
                 let tabs: Vec<TabInfo> = session
                     .tabs
                     .iter()
@@ -291,7 +344,8 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                 if tiled_count == 1 && tab.floating_panes().count() == 0 {
                     // Single tiled pane — fill the area
                     if let Some(pane) = tab.tiled_panes().next() {
-                        let view = TerminalView::new(&pane.grid);
+                        let view = TerminalView::new(&pane.grid)
+                            .scrollback_offset(pane.scrollback_offset);
                         frame.render_widget(view, term_area);
                     }
                 } else {
@@ -337,38 +391,45 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                         let block = Block::default()
                             .borders(Borders::ALL)
                             .border_style(border_style)
-                            .title(Span::styled(
-                                format!(" {} ", pane_title),
-                                title_style,
-                            ));
+                            .title(Span::styled(format!(" {} ", pane_title), title_style));
                         let inner = block.inner(pane_area);
                         frame.render_widget(block, pane_area);
 
                         let view = TerminalView::new(&pane.grid)
-                            .show_cursor(pane.focused);
+                            .show_cursor(pane.focused)
+                            .scrollback_offset(pane.scrollback_offset);
                         frame.render_widget(view, inner);
                     }
                 }
 
                 // ── Floating panes (rendered on TOP of tiled panes) ──
                 // Collect floating pane info first to avoid borrow issues
-                let floating_info: Vec<_> = tab.floating_panes().map(|pane| {
-                    let chrome_y = if show_tab_bar { 1u16 } else { 0 };
-                    let sidebar_x = if fb_visible { fb_width } else { 0 };
-                    let float_area = ratatui::layout::Rect {
-                        x: pane.rect.x.saturating_add(sidebar_x),
-                        y: pane.rect.y.saturating_add(chrome_y),
-                        width: pane.rect.width.min(area.width.saturating_sub(pane.rect.x + sidebar_x)),
-                        height: pane.rect.height.min(area.height.saturating_sub(pane.rect.y + chrome_y)),
-                    };
-                    (float_area, pane.focused, pane.grid.title.clone())
-                }).collect();
+                let floating_info: Vec<_> = tab
+                    .floating_panes()
+                    .map(|pane| {
+                        let chrome_y = if show_tab_bar { 1u16 } else { 0 };
+                        let sidebar_x = if fb_visible { fb_width } else { 0 };
+                        let float_area = ratatui::layout::Rect {
+                            x: pane.rect.x.saturating_add(sidebar_x),
+                            y: pane.rect.y.saturating_add(chrome_y),
+                            width: pane
+                                .rect
+                                .width
+                                .min(area.width.saturating_sub(pane.rect.x + sidebar_x)),
+                            height: pane
+                                .rect
+                                .height
+                                .min(area.height.saturating_sub(pane.rect.y + chrome_y)),
+                        };
+                        (float_area, pane.focused, pane.grid.title.clone(), pane.scrollback_offset)
+                    })
+                    .collect();
 
                 // Draw shadows
                 {
                     let buf = frame.buffer_mut();
                     let shadow_style = Style::default().bg(Color::Rgb(17, 17, 27));
-                    for (float_area, _, _) in &floating_info {
+                    for (float_area, _, _, _) in &floating_info {
                         if float_area.width < 4 || float_area.height < 3 {
                             continue;
                         }
@@ -402,8 +463,10 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                 // Render floating pane widgets
                 let mut float_pane_idx = 0;
                 for pane in tab.floating_panes() {
-                    if float_pane_idx >= floating_info.len() { break; }
-                    let (float_area, focused, _) = &floating_info[float_pane_idx];
+                    if float_pane_idx >= floating_info.len() {
+                        break;
+                    }
+                    let (float_area, focused, _, scrollback_offset) = &floating_info[float_pane_idx];
                     float_pane_idx += 1;
 
                     if float_area.width < 4 || float_area.height < 3 {
@@ -435,15 +498,13 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                     let block = Block::default()
                         .borders(Borders::ALL)
                         .border_style(border_style)
-                        .title(Span::styled(
-                            format!(" {} ", pane_title),
-                            title_style,
-                        ));
+                        .title(Span::styled(format!(" {} ", pane_title), title_style));
                     let inner = block.inner(*float_area);
                     frame.render_widget(block, *float_area);
 
                     let view = TerminalView::new(&pane.grid)
-                        .show_cursor(pane.focused);
+                        .show_cursor(pane.focused)
+                        .scrollback_offset(*scrollback_offset);
                     frame.render_widget(view, inner);
                 }
             }
@@ -465,7 +526,10 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                 let border_style = Style::default()
                     .fg(border_color)
                     .add_modifier(Modifier::BOLD);
-                let fname = ep.state.path.file_name()
+                let fname = ep
+                    .state
+                    .path
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "[no name]".to_string());
                 let mod_flag = if ep.state.modified { " [+]" } else { "" };
@@ -501,6 +565,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                         (title, t.broadcast, t.panes.len(), fi)
                     })
                     .unwrap_or(("shell", false, 0, 0));
+                let current_notification = notifications.front().map(|n| n.msg.as_str());
                 let status = StatusBar {
                     session_name: &session.name,
                     pane_title,
@@ -508,8 +573,12 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                     tab_count: session.tabs.len(),
                     broadcast,
                     focused_index: focused_idx,
+                    notification: current_notification,
                 };
                 frame.render_widget(status, v_chunks[v_idx]);
+
+                // (Notification rendering is handled by StatusBar via the
+                // `notification` field passed above; no extra manual drawing here.)
             }
 
             // ── Overlays ──
@@ -519,11 +588,8 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                     frame.render_widget(help, area);
                 }
                 Overlay::CommandPalette => {
-                    let palette = CommandPalette::new(
-                        &filtered_commands,
-                        palette_selected,
-                        &palette_filter,
-                    );
+                    let palette =
+                        CommandPalette::new(&filtered_commands, palette_selected, &palette_filter);
                     frame.render_widget(palette, area);
                 }
                 Overlay::None => {}
@@ -561,11 +627,19 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     }
                                     KeyCode::Enter => {
                                         if let Some(cmd) = filtered_commands.get(palette_selected) {
+                                            // Track this command as recently used
+                                            let cmd_label = cmd.label.clone();
+                                            recent_commands.retain(|c| c != &cmd_label);
+                                            recent_commands.push_front(cmd_label);
+                                            if recent_commands.len() > 10 {
+                                                recent_commands.pop_back();
+                                            }
+
                                             let action = palette_action_for(cmd);
                                             overlay = Overlay::None;
                                             palette_filter.clear();
                                             palette_selected = 0;
-                                            filtered_commands = commands.clone();
+                                            filtered_commands = filter_commands(&commands, "", &recent_commands);
 
                                             if let Some(a) = action {
                                                 if execute_palette_action(
@@ -588,12 +662,12 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     KeyCode::Backspace => {
                                         palette_filter.pop();
                                         palette_selected = 0;
-                                        filtered_commands = filter_commands(&commands, &palette_filter);
+                                        filtered_commands = filter_commands(&commands, &palette_filter, &recent_commands);
                                     }
                                     KeyCode::Char(c) => {
                                         palette_filter.push(c);
                                         palette_selected = 0;
-                                        filtered_commands = filter_commands(&commands, &palette_filter);
+                                        filtered_commands = filter_commands(&commands, &palette_filter, &recent_commands);
                                     }
                                     _ => {}
                                 }
@@ -614,7 +688,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     overlay = Overlay::CommandPalette;
                                     palette_filter.clear();
                                     palette_selected = 0;
-                                    filtered_commands = commands.clone();
+                                    filtered_commands = filter_commands(&commands, "", &recent_commands);
                                     continue;
                                 }
                                 Action::ToggleFileBrowser => {
@@ -720,29 +794,64 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                             match key.code {
                                 KeyCode::Up => {
                                     file_browser.cursor_up();
+                                    file_browser.load_preview();
                                 }
                                 KeyCode::Down => {
                                     file_browser.cursor_down();
                                     let h = terminal.size().map(|s| s.height.saturating_sub(4) as usize).unwrap_or(20);
                                     file_browser.adjust_scroll(h);
+                                    file_browser.load_preview();
                                 }
                                 KeyCode::Enter => {
-                                    if let Some(entry) = file_browser.selected_entry() {
-                                        if entry.is_dir {
-                                            let path = entry.path.clone();
-                                            let entry_name = entry.name.clone();
-                                            if entry_name == ".." {
-                                                file_browser.navigate_to(path);
-                                            } else {
-                                                file_browser.toggle_expand();
+                                    // Ctrl+Enter: open in split (file in new editor, folder in new pane)
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                        if let Some(entry) = file_browser.selected_entry() {
+                                            if entry.is_dir && entry.name != ".." {
+                                                let path = entry.path.clone();
+                                                let area = compute_pane_area(
+                                                    &terminal,
+                                                    show_tab_bar,
+                                                    show_status_bar,
+                                                    file_browser.width,
+                                                    if ai_sidebar.visible { ai_sidebar.width } else { 0 },
+                                                );
+                                                open_folder_in_pane(
+                                                    &mut session,
+                                                    &shell,
+                                                    &path,
+                                                    area,
+                                                );
+                                                focus = Focus::Terminal;
+                                                push_notification(&mut notifications, "Opened folder in new pane".to_string(), 2000);
+                                            } else if !entry.is_dir {
+                                                // Open file in floating editor
+                                                let path = entry.path.clone();
+                                                let screen_area = compute_screen_area(&terminal, show_tab_bar, show_status_bar,
+                                                    if file_browser.visible { file_browser.width } else { 0 },
+                                                    if ai_sidebar.visible  { ai_sidebar.width   } else { 0 });
+                                                open_file_in_editor(&path, screen_area, &mut editor_panes, &mut next_editor_id, &mut focus);
                                             }
-                                        } else {
-                                            // ── Open file in editor ──
-                                            let path = entry.path.clone();
-                                            let screen_area = compute_screen_area(&terminal, show_tab_bar, show_status_bar,
-                                                if file_browser.visible { file_browser.width } else { 0 },
-                                                if ai_sidebar.visible  { ai_sidebar.width   } else { 0 });
-                                            open_file_in_editor(&path, screen_area, &mut editor_panes, &mut next_editor_id, &mut focus);
+                                        }
+                                    } else {
+                                        // Regular Enter: navigate folders, open files in editor
+                                        if let Some(entry) = file_browser.selected_entry() {
+                                            if entry.is_dir {
+                                                let path = entry.path.clone();
+                                                let entry_name = entry.name.clone();
+                                                if entry_name == ".." {
+                                                    file_browser.navigate_to(path);
+                                                    file_browser.load_preview();
+                                                } else {
+                                                    file_browser.toggle_expand();
+                                                }
+                                            } else {
+                                                // ── Open file in editor ──
+                                                let path = entry.path.clone();
+                                                let screen_area = compute_screen_area(&terminal, show_tab_bar, show_status_bar,
+                                                    if file_browser.visible { file_browser.width } else { 0 },
+                                                    if ai_sidebar.visible  { ai_sidebar.width   } else { 0 });
+                                                open_file_in_editor(&path, screen_area, &mut editor_panes, &mut next_editor_id, &mut focus);
+                                            }
                                         }
                                     }
                                 }
@@ -773,6 +882,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     if let Some(parent) = file_browser.root.parent() {
                                         let parent = parent.to_path_buf();
                                         file_browser.navigate_to(parent);
+                                        file_browser.load_preview();
                                     }
                                 }
                                 KeyCode::Esc | KeyCode::Tab => {
@@ -781,6 +891,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                 }
                                 KeyCode::Char('r') => {
                                     file_browser.refresh_root();
+                                    file_browser.load_preview();
                                 }
                                 KeyCode::Char('/') => {
                                     file_browser.enter_search();
@@ -826,7 +937,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                         ai_sidebar.provider_right();
                                     }
                                 }
-                                KeyCode::Enter => {
+                                KeyCode::Enter | KeyCode::Char(' ') => {
                                     match ai_sidebar.focused_field.clone() {
                                         AiSidebarField::SaveButton => {
                                             // Sync sidebar state → config → persist
@@ -835,19 +946,56 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                                 UiAiProvider::OpenAi    => crate::config::AiProvider::Openai,
                                                 UiAiProvider::Ollama    => crate::config::AiProvider::Ollama,
                                                 UiAiProvider::Custom    => crate::config::AiProvider::Custom,
+                                                UiAiProvider::ZAi       => crate::config::AiProvider::Zai,
+                                                UiAiProvider::Kimi      => crate::config::AiProvider::Kimi,
                                             };
                                             cfg.ai.api_key   = ai_sidebar.api_key.clone();
                                             cfg.ai.model     = ai_sidebar.model.clone();
                                             cfg.ai.base_url  = ai_sidebar.base_url.clone();
+
+                                            // Handle keyring save based on checkbox
+                                            if ai_sidebar.save_to_keyring && !cfg.ai.api_key.is_empty() {
+                                                // Will be saved to keyring by cfg.save()
+                                            } else if !ai_sidebar.save_to_keyring {
+                                                // User doesn't want keyring - try to delete any existing entry
+                                                let _ = crate::config::delete_ai_key_from_keyring();
+                                            }
+
                                             match cfg.save() {
                                                 Ok(_) => {
                                                     ai_sidebar.dirty = false;
                                                     ai_sidebar.status_msg = Some("Saved!".to_string());
+                                                    push_notification(&mut notifications, "AI configuration saved".to_string(), 3000);
                                                 }
                                                 Err(e) => {
                                                     ai_sidebar.status_msg = Some(format!("Error: {}", e));
+                                                    push_notification(
+                                                        &mut notifications,
+                                                        format!("Failed to save AI config: {}", e),
+                                                        5000,
+                                                    );
                                                 }
                                             }
+                                        }
+                                        AiSidebarField::SaveToKeyring => {
+                                            // Toggle the checkbox
+                                            ai_sidebar.save_to_keyring = !ai_sidebar.save_to_keyring;
+                                            ai_sidebar.dirty = true;
+                                        }
+                                        AiSidebarField::TestConnection => {
+                                            // Spawn async test connection
+                                            ai_sidebar.test_status = Some("Testing...".to_string());
+                                            push_notification(&mut notifications, "Testing AI connection...".to_string(), 2000);
+
+                                            let provider = ai_sidebar.provider;
+                                            let api_key = ai_sidebar.api_key.clone();
+                                            let base_url = ai_sidebar.base_url.clone();
+                                            let tx = test_tx.clone();
+
+                                            tokio::spawn(async move {
+                                                let result = test_ai_connection(provider, &api_key, &base_url).await;
+                                                let _ = tx.send(result);
+                                            });
                                         }
                                         AiSidebarField::StartChatButton => {
                                             let ai_w = ai_sidebar.width;
@@ -869,6 +1017,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                                 0,
                                             );
                                             session.relayout_all(area2);
+                                            push_notification(&mut notifications, "AI chat started".to_string(), 3000);
                                         }
                                         AiSidebarField::Provider(i) => {
                                             ai_sidebar.provider = uterx_ui::widgets::ai_sidebar::AiProvider::from_index(i);
@@ -880,7 +1029,17 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                         }
                                     }
                                 }
-                                KeyCode::Backspace => ai_sidebar.pop_char(),
+                                KeyCode::Backspace => {
+                                    // Only handle backspace for text fields, not buttons/checkboxes
+                                    if !matches!(ai_sidebar.focused_field,
+                                        AiSidebarField::SaveButton |
+                                        AiSidebarField::SaveToKeyring |
+                                        AiSidebarField::TestConnection |
+                                        AiSidebarField::StartChatButton)
+                                    {
+                                        ai_sidebar.pop_char();
+                                    }
+                                }
                                 KeyCode::Char(c) => {
                                     // Ctrl+W = close sidebar
                                     if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'w' {
@@ -894,7 +1053,15 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                             0,
                                         );
                                         session.relayout_all(area);
-                                    } else {
+                                    } else if c == ' ' && matches!(ai_sidebar.focused_field, AiSidebarField::SaveToKeyring) {
+                                        // Space toggles checkbox (already handled in Enter above)
+                                    } else if !matches!(ai_sidebar.focused_field,
+                                        AiSidebarField::SaveButton |
+                                        AiSidebarField::SaveToKeyring |
+                                        AiSidebarField::TestConnection |
+                                        AiSidebarField::StartChatButton)
+                                    {
+                                        // Only push chars to text fields
                                         ai_sidebar.push_char(c);
                                     }
                                 }
@@ -1204,16 +1371,36 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
 
                             // ── File browser area (left) ──
                             if file_browser.visible && mouse.column < sidebar_w {
-                                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                                    focus = Focus::FileBrowser;
-                                    let header_offset = chrome_y + 2;
-                                    if mouse.row >= header_offset {
-                                        let clicked_idx = file_browser.scroll_offset
-                                            + (mouse.row - header_offset) as usize;
-                                        if clicked_idx < file_browser.entries.len() {
-                                            file_browser.cursor = clicked_idx;
+                                match mouse.kind {
+                                    MouseEventKind::Down(MouseButton::Left) => {
+                                        focus = Focus::FileBrowser;
+                                        let header_offset = chrome_y + 2;
+                                        if mouse.row >= header_offset {
+                                            let clicked_idx = file_browser.scroll_offset
+                                                + (mouse.row - header_offset) as usize;
+                                            if clicked_idx < file_browser.entries.len() {
+                                                file_browser.cursor = clicked_idx;
+                                            }
                                         }
                                     }
+                                    MouseEventKind::ScrollUp => {
+                                        // Scroll file browser up
+                                        focus = Focus::FileBrowser;
+                                        let term_h = terminal.size().map(|s| s.height).unwrap_or(24);
+                                        let visible_h = term_h.saturating_sub(chrome_y + 4) as usize;
+                                        file_browser.scroll_offset = file_browser.scroll_offset.saturating_sub(3);
+                                        file_browser.adjust_scroll(visible_h);
+                                    }
+                                    MouseEventKind::ScrollDown => {
+                                        // Scroll file browser down
+                                        focus = Focus::FileBrowser;
+                                        let term_h = terminal.size().map(|s| s.height).unwrap_or(24);
+                                        let visible_h = term_h.saturating_sub(chrome_y + 4) as usize;
+                                        file_browser.scroll_offset = (file_browser.scroll_offset + 3)
+                                            .min(file_browser.entries.len().saturating_sub(visible_h));
+                                        file_browser.adjust_scroll(visible_h);
+                                    }
+                                    _ => {}
                                 }
                                 continue;
                             }
@@ -1318,7 +1505,12 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                     _ => {}
                 }
             }
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(4)) => {}
+            Some(result) = test_rx.recv() => {
+                // Test connection result arrived
+                ai_sidebar.test_status = Some(result.clone());
+                push_notification(&mut notifications, result, 4000);
+            }
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {}
         }
     }
 
@@ -1393,8 +1585,16 @@ fn execute_palette_action(
     show_tab_bar: bool,
     show_status_bar: bool,
 ) -> bool {
-    let left_w  = if file_browser.visible { file_browser.width } else { 0 };
-    let right_w = if ai_sidebar.visible   { ai_sidebar.width   } else { 0 };
+    let left_w = if file_browser.visible {
+        file_browser.width
+    } else {
+        0
+    };
+    let right_w = if ai_sidebar.visible {
+        ai_sidebar.width
+    } else {
+        0
+    };
     match action {
         PaletteAction::Quit => return true,
         PaletteAction::Help => {
@@ -1407,7 +1607,11 @@ fn execute_palette_action(
             } else {
                 *focus = Focus::Terminal;
             }
-            let left = if file_browser.visible { file_browser.width } else { 0 };
+            let left = if file_browser.visible {
+                file_browser.width
+            } else {
+                0
+            };
             let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left, right_w);
             session.relayout_all(area);
         }
@@ -1418,7 +1622,11 @@ fn execute_palette_action(
             } else {
                 *focus = Focus::Terminal;
             }
-            let right = if ai_sidebar.visible { ai_sidebar.width } else { 0 };
+            let right = if ai_sidebar.visible {
+                ai_sidebar.width
+            } else {
+                0
+            };
             let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left_w, right);
             session.relayout_all(area);
         }
@@ -1441,47 +1649,159 @@ fn execute_palette_action(
         PaletteAction::PrevTab => session.prev_tab(),
         PaletteAction::SplitVertical => {
             let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left_w, right_w);
-            if let Some(tab) = session.active_tab_mut() { tab.relayout(area); }
+            if let Some(tab) = session.active_tab_mut() {
+                tab.relayout(area);
+            }
             let _ = session.split_vertical(shell);
-            if let Some(tab) = session.active_tab_mut() { tab.relayout(area); }
+            if let Some(tab) = session.active_tab_mut() {
+                tab.relayout(area);
+            }
         }
         PaletteAction::SplitHorizontal => {
             let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left_w, right_w);
-            if let Some(tab) = session.active_tab_mut() { tab.relayout(area); }
+            if let Some(tab) = session.active_tab_mut() {
+                tab.relayout(area);
+            }
             let _ = session.split_horizontal(shell);
-            if let Some(tab) = session.active_tab_mut() { tab.relayout(area); }
+            if let Some(tab) = session.active_tab_mut() {
+                tab.relayout(area);
+            }
         }
         PaletteAction::NextPane => {
-            if let Some(tab) = session.active_tab_mut() { tab.focus_next(); }
+            if let Some(tab) = session.active_tab_mut() {
+                tab.focus_next();
+            }
         }
         PaletteAction::PrevPane => {
-            if let Some(tab) = session.active_tab_mut() { tab.focus_prev(); }
+            if let Some(tab) = session.active_tab_mut() {
+                tab.focus_prev();
+            }
         }
         PaletteAction::Broadcast => {
-            if let Some(tab) = session.active_tab_mut() { tab.toggle_broadcast(); }
+            if let Some(tab) = session.active_tab_mut() {
+                tab.toggle_broadcast();
+            }
         }
         PaletteAction::ToggleFloat => {
             let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left_w, right_w);
-            if let Some(tab) = session.active_tab_mut() { tab.toggle_float(area); }
+            if let Some(tab) = session.active_tab_mut() {
+                tab.toggle_float(area);
+            }
         }
     }
     false
 }
 
-/// Filter commands by substring match.
-fn filter_commands(all: &[CommandEntry], filter: &str) -> Vec<CommandEntry> {
+/// Filter commands by fuzzy match and prioritize recent commands.
+fn filter_commands(
+    all: &[CommandEntry],
+    filter: &str,
+    recent: &VecDeque<String>,
+) -> Vec<CommandEntry> {
+    // If no filter, return all with recent commands first
     if filter.is_empty() {
-        return all.to_vec();
+        let mut result = Vec::new();
+        // Add recent commands first
+        for recent_label in recent.iter() {
+            if let Some(cmd) = all.iter().find(|c| &c.label == recent_label) {
+                result.push(cmd.clone());
+            }
+        }
+        // Add remaining commands
+        for cmd in all.iter() {
+            if !recent.contains(&cmd.label) {
+                result.push(cmd.clone());
+            }
+        }
+        return result;
     }
-    let f = filter.to_lowercase();
-    all.iter()
-        .filter(|c| {
-            c.label.to_lowercase().contains(&f)
-                || c.shortcut.to_lowercase().contains(&f)
-                || c.description.to_lowercase().contains(&f)
+
+    let pat = filter.to_lowercase();
+
+    // Simple fuzzy subsequence scorer:
+    // - returns None if pattern is not a subsequence of text
+    // - otherwise returns a score (higher is better), rewarding consecutive matches
+    fn fuzzy_score(pat: &str, text: &str) -> Option<usize> {
+        let tchars: Vec<char> = text.to_lowercase().chars().collect();
+        let pchars: Vec<char> = pat.chars().collect();
+        let mut score: usize = 0;
+        let mut last_idx: Option<usize> = None;
+        let mut idx: usize = 0;
+
+        for &pc in &pchars {
+            let mut found = false;
+            while idx < tchars.len() {
+                if tchars[idx] == pc {
+                    // Base point for a match
+                    score = score.saturating_add(1);
+                    // Bonus for consecutive match
+                    if let Some(prev) = last_idx {
+                        if idx == prev + 1 {
+                            score = score.saturating_add(2);
+                        }
+                    }
+                    last_idx = Some(idx);
+                    idx += 1;
+                    found = true;
+                    break;
+                }
+                idx += 1;
+            }
+            if !found {
+                return None;
+            }
+        }
+        Some(score)
+    }
+
+    // Score each command by taking the best match across label, shortcut, description.
+    let mut scored: Vec<(usize, CommandEntry)> = all
+        .iter()
+        .filter_map(|c| {
+            let mut best: Option<usize> = None;
+            if let Some(s) = fuzzy_score(&pat, &c.label) {
+                best = Some(best.map_or(s * 1000, |b| b.max(s * 1000)));
+            }
+            if let Some(s) = fuzzy_score(&pat, &c.shortcut) {
+                best = Some(best.map_or(s * 800, |b| b.max(s * 800)));
+            }
+            if let Some(s) = fuzzy_score(&pat, &c.description) {
+                best = Some(best.map_or(s * 600, |b| b.max(s * 600)));
+            }
+
+            // Boost score significantly if this is a recent command
+            if let Some(score) = best {
+                let recent_bonus = if recent.contains(&c.label) {
+                    // Recent commands get a massive boost based on recency
+                    let pos = recent.iter().position(|r| r == &c.label).unwrap_or(10);
+                    (10 - pos.min(9)) * 10000 // More recent = higher bonus
+                } else {
+                    0
+                };
+                best = Some(score + recent_bonus);
+            }
+
+            best.map(|score| (score, c.clone()))
         })
-        .cloned()
-        .collect()
+        .collect();
+
+    // If nothing matched (should be rare because subsequence is strict), fallback to substring filter.
+    if scored.is_empty() {
+        let f = pat.clone();
+        return all
+            .iter()
+            .filter(|c| {
+                c.label.to_lowercase().contains(&f)
+                    || c.shortcut.to_lowercase().contains(&f)
+                    || c.description.to_lowercase().contains(&f)
+            })
+            .cloned()
+            .collect();
+    }
+
+    // Sort by score descending and return entries.
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.into_iter().map(|(_, e)| e).collect()
 }
 
 /// Open a file in a floating editor pane.
@@ -1508,7 +1828,12 @@ fn open_file_in_editor(
     editor_panes.push(EditorPane {
         id,
         state,
-        rect: ratatui::layout::Rect { x: fx, y: fy, width: fw, height: fh },
+        rect: ratatui::layout::Rect {
+            x: fx,
+            y: fy,
+            width: fw,
+            height: fh,
+        },
     });
     *focus = Focus::Editor(id);
 }
@@ -1551,8 +1876,7 @@ fn compute_pane_area(
     right_sidebar_width: u16,
 ) -> MuxRect {
     let size = terminal.size().unwrap_or_default();
-    let chrome_rows: u16 =
-        if show_tab_bar { 1 } else { 0 } + if show_status_bar { 1 } else { 0 };
+    let chrome_rows: u16 = if show_tab_bar { 1 } else { 0 } + if show_status_bar { 1 } else { 0 };
     let total_sidebar = left_sidebar_width.saturating_add(right_sidebar_width);
     MuxRect {
         x: 0,
@@ -1652,6 +1976,177 @@ fn key_to_bytes(key: &crossterm::event::KeyEvent) -> Vec<u8> {
 }
 
 /// Handle a mouse event — focus pane on click, scroll wheel.
+/// Test AI connection based on provider and credentials.
+async fn test_ai_connection(provider: UiAiProvider, api_key: &str, base_url: &str) -> String {
+    use UiAiProvider::*;
+
+    match provider {
+        Anthropic => {
+            if api_key.is_empty() {
+                return "❌ API key required for Anthropic".to_string();
+            }
+            // Simple test: try to list models or make a minimal request
+            let client = reqwest::Client::new();
+            let res = client
+                .get("https://api.anthropic.com/v1/models")
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await;
+
+            match res {
+                Ok(resp) if resp.status().is_success() => {
+                    "✓ Anthropic connection successful".to_string()
+                }
+                Ok(resp) => {
+                    format!("❌ Anthropic error: {}", resp.status())
+                }
+                Err(e) => {
+                    format!("❌ Anthropic connection failed: {}", e)
+                }
+            }
+        }
+        OpenAi => {
+            if api_key.is_empty() {
+                return "❌ API key required for OpenAI".to_string();
+            }
+            let client = reqwest::Client::new();
+            let res = client
+                .get("https://api.openai.com/v1/models")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await;
+
+            match res {
+                Ok(resp) if resp.status().is_success() => {
+                    "✓ OpenAI connection successful".to_string()
+                }
+                Ok(resp) => {
+                    format!("❌ OpenAI error: {}", resp.status())
+                }
+                Err(e) => {
+                    format!("❌ OpenAI connection failed: {}", e)
+                }
+            }
+        }
+        Ollama => {
+            let url = if base_url.is_empty() {
+                "http://localhost:11434/api/tags"
+            } else {
+                base_url
+            };
+
+            let client = reqwest::Client::new();
+            let res = client
+                .get(url)
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await;
+
+            match res {
+                Ok(resp) if resp.status().is_success() => {
+                    "✓ Ollama connection successful".to_string()
+                }
+                Ok(resp) => {
+                    format!("❌ Ollama error: {}", resp.status())
+                }
+                Err(_) => "❌ Ollama not reachable (is it running?)".to_string(),
+            }
+        }
+        Custom => {
+            if base_url.is_empty() {
+                return "❌ Base URL required for custom provider".to_string();
+            }
+
+            let client = reqwest::Client::new();
+            let test_url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+            let mut req = client
+                .get(&test_url)
+                .timeout(std::time::Duration::from_secs(5));
+
+            if !api_key.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", api_key));
+            }
+
+            let res = req.send().await;
+
+            match res {
+                Ok(resp) if resp.status().is_success() => {
+                    "✓ Custom provider connection successful".to_string()
+                }
+                Ok(resp) => {
+                    format!("❌ Custom provider error: {}", resp.status())
+                }
+                Err(e) => {
+                    format!("❌ Custom provider failed: {}", e)
+                }
+            }
+        }
+        ZAi => {
+            if api_key.is_empty() {
+                return "❌ API key required for z.Ai".to_string();
+            }
+            let url = if base_url.is_empty() {
+                "https://api.z.ai/v1/models".to_string()
+            } else {
+                format!("{}/v1/models", base_url.trim_end_matches('/'))
+            };
+
+            let client = reqwest::Client::new();
+            let res = client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await;
+
+            match res {
+                Ok(resp) if resp.status().is_success() => {
+                    "✓ z.Ai connection successful".to_string()
+                }
+                Ok(resp) => {
+                    format!("❌ z.Ai error: {}", resp.status())
+                }
+                Err(e) => {
+                    format!("❌ z.Ai connection failed: {}", e)
+                }
+            }
+        }
+        Kimi => {
+            if api_key.is_empty() {
+                return "❌ API key required for Kimi".to_string();
+            }
+            let url = if base_url.is_empty() {
+                "https://api.moonshot.cn/v1/models".to_string()
+            } else {
+                format!("{}/v1/models", base_url.trim_end_matches('/'))
+            };
+
+            let client = reqwest::Client::new();
+            let res = client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await;
+
+            match res {
+                Ok(resp) if resp.status().is_success() => {
+                    "✓ Kimi connection successful".to_string()
+                }
+                Ok(resp) => {
+                    format!("❌ Kimi error: {}", resp.status())
+                }
+                Err(e) => {
+                    format!("❌ Kimi connection failed: {}", e)
+                }
+            }
+        }
+    }
+}
+
 fn handle_mouse_event(
     session: &mut Session,
     mouse: crossterm::event::MouseEvent,
@@ -1684,8 +2179,30 @@ fn handle_mouse_event(
                 tab.active_pane = Some(pid);
             }
         }
-        MouseEventKind::ScrollUp => {}
-        MouseEventKind::ScrollDown => {}
+        MouseEventKind::ScrollUp => {
+            // Find pane under mouse and scroll up (show older scrollback)
+            for pane in &mut tab.panes {
+                let r = &pane.rect;
+                if mx >= r.x && mx < r.x + r.width && my >= r.y && my < r.y + r.height {
+                    // Scroll up by 3 lines (show older content)
+                    let scrollback_len = pane.grid.scrollback.len();
+                    let max_scroll = scrollback_len + pane.grid.rows();
+                    pane.scrollback_offset = (pane.scrollback_offset + 3).min(max_scroll);
+                    break;
+                }
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            // Find pane under mouse and scroll down (show newer content / back to current)
+            for pane in &mut tab.panes {
+                let r = &pane.rect;
+                if mx >= r.x && mx < r.x + r.width && my >= r.y && my < r.y + r.height {
+                    // Scroll down by 3 lines
+                    pane.scrollback_offset = pane.scrollback_offset.saturating_sub(3);
+                    break;
+                }
+            }
+        }
         _ => {}
     }
 }
