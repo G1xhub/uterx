@@ -35,7 +35,8 @@ use std::io;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use uterx_mux::{Rect as MuxRect, Session};
-use uterx_ui::TerminalView;
+use uterx_mux::layout::SplitDirection;
+use uterx_ui::{TerminalView, SearchMatch as UiSearchMatch};
 use uterx_ui::input::{Action, InputHandler};
 use uterx_ui::widgets::ai_sidebar::{
     AiProvider as UiAiProvider, AiSidebarField, AiSidebarState, AiSidebarWidget,
@@ -53,6 +54,8 @@ enum Overlay {
     None,
     Help,
     CommandPalette,
+    Search,
+    TabRename { tab_id: uterx_mux::TabId },
 }
 
 /// Where keyboard input is currently directed.
@@ -84,6 +87,105 @@ struct DragState {
 struct EditorDragState {
     editor_id: u64,
     offset_x: u16,
+}
+
+/// State for resizing split panes.
+struct SplitResizeState {
+    /// Index of the first pane in the split (the one before the border)
+    pane_idx: usize,
+    /// Initial mouse position when drag started
+    start_x: u16,
+    start_y: u16,
+}
+
+/// State for mouse-drag text selection.
+struct SelectionDragState {
+    pane_id: uterx_mux::PaneId,
+    start_row: usize,
+    start_col: usize,
+}
+
+/// Search match position (row, col, length).
+#[derive(Debug, Clone, Copy)]
+struct SearchMatch {
+    row: usize,
+    col: usize,
+    len: usize,
+}
+
+/// State for terminal search functionality.
+struct SearchState {
+    query: String,
+    matches: Vec<SearchMatch>,
+    current_match: usize,
+}
+
+impl SearchState {
+    fn new() -> Self {
+        Self {
+            query: String::new(),
+            matches: Vec::new(),
+            current_match: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.query.clear();
+        self.matches.clear();
+        self.current_match = 0;
+    }
+
+    fn find_matches(&mut self, pane: &uterx_mux::Pane) {
+        self.matches.clear();
+        if self.query.is_empty() {
+            return;
+        }
+
+        let query_lower = self.query.to_lowercase();
+
+        // Search in current grid
+        for row in 0..pane.grid.rows() {
+            for col in 0..pane.grid.cols() {
+                if let Some(cell) = pane.grid.cell(row, col) {
+                    let cell_text = cell.content.to_lowercase();
+                    if cell_text.starts_with(&query_lower) {
+                        self.matches.push(SearchMatch {
+                            row,
+                            col,
+                            len: self.query.len(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Sort by row, then col
+        self.matches.sort_by(|a, b| {
+            a.row.cmp(&b.row).then_with(|| a.col.cmp(&b.col))
+        });
+
+        self.current_match = 0;
+    }
+
+    fn next_match(&mut self) -> Option<&SearchMatch> {
+        if self.matches.is_empty() {
+            return None;
+        }
+        self.current_match = (self.current_match + 1) % self.matches.len();
+        Some(&self.matches[self.current_match])
+    }
+
+    fn prev_match(&mut self) -> Option<&SearchMatch> {
+        if self.matches.is_empty() {
+            return None;
+        }
+        if self.current_match == 0 {
+            self.current_match = self.matches.len() - 1;
+        } else {
+            self.current_match -= 1;
+        }
+        Some(&self.matches[self.current_match])
+    }
 }
 
 /// Transient notification shown in the status bar.
@@ -196,6 +298,18 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
     let mut editor_panes: Vec<EditorPane> = Vec::new();
     let mut next_editor_id: u64 = 1;
     let mut editor_dragging: Option<EditorDragState> = None;
+
+    // Split resize state for dragging pane borders
+    let mut split_resizing: Option<SplitResizeState> = None;
+
+    // Text selection drag state
+    let mut selection_dragging: Option<SelectionDragState> = None;
+
+    // Search state for "Find in Terminal"
+    let mut search_state: SearchState = SearchState::new();
+
+    // Tab rename buffer
+    let mut tab_rename_buffer: String = String::new();
 
     // Notifications (transient messages displayed in status bar)
     let mut notifications: VecDeque<Notification> = VecDeque::new();
@@ -338,17 +452,75 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
 
             // ── Terminal panes ──
             if let Some(tab) = session.active_tab() {
-                // Count only tiled panes for layout
-                let tiled_count = tab.panes.iter().filter(|p| !p.is_floating).count();
-
-                if tiled_count == 1 && tab.floating_panes().count() == 0 {
-                    // Single tiled pane — fill the area
-                    if let Some(pane) = tab.tiled_panes().next() {
+                // Check if a pane is maximized
+                if let Some(maximized_pane) = tab.maximized_pane() {
+                    // Render only the maximized pane, filling the entire area
+                    let maximized_id = maximized_pane.id;
+                    if let Some(pane) = tab.panes.iter().find(|p| p.id == maximized_id) {
+                        // Show border and title for maximized pane
+                        let border_style = Style::default()
+                            .fg(Color::Rgb(166, 227, 161)) // Green accent for maximized
+                            .add_modifier(Modifier::BOLD);
+                        let title_style = Style::default()
+                            .fg(Color::Rgb(205, 214, 244))
+                            .add_modifier(Modifier::BOLD);
+                        
+                        let pane_title = if pane.grid.title.is_empty() {
+                            "[MAXIMIZED] shell".to_string()
+                        } else {
+                            format!("[MAXIMIZED] {}", pane.grid.title)
+                        };
+                        
+                        let block = Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(border_style)
+                            .title(Span::styled(format!(" {} ", pane_title), title_style));
+                        let inner = block.inner(term_area);
+                        frame.render_widget(block, term_area);
+                        
+                        // Prepare search matches for this pane
+                        let search_matches: Vec<UiSearchMatch> = if overlay == Overlay::Search {
+                            search_state.matches.iter().map(|m| UiSearchMatch {
+                                row: m.row,
+                                col: m.col,
+                                len: m.len,
+                            }).collect()
+                        } else {
+                            Vec::new()
+                        };
+                        
                         let view = TerminalView::new(&pane.grid)
-                            .scrollback_offset(pane.scrollback_offset);
-                        frame.render_widget(view, term_area);
+                            .show_cursor(pane.focused)
+                            .scrollback_offset(pane.scrollback_offset)
+                            .selection(pane.selection.as_ref())
+                            .search_matches(&search_matches, search_state.current_match);
+                        frame.render_widget(view, inner);
                     }
                 } else {
+                    // Count only tiled panes for layout
+                    let tiled_count = tab.panes.iter().filter(|p| !p.is_floating).count();
+
+                    if tiled_count == 1 && tab.floating_panes().count() == 0 {
+                        // Single tiled pane — fill the area
+                        if let Some(pane) = tab.tiled_panes().next() {
+                            // Prepare search matches for this pane
+                            let search_matches: Vec<UiSearchMatch> = if overlay == Overlay::Search {
+                                search_state.matches.iter().map(|m| UiSearchMatch {
+                                    row: m.row,
+                                    col: m.col,
+                                    len: m.len,
+                                }).collect()
+                            } else {
+                                Vec::new()
+                            };
+                            
+                            let view = TerminalView::new(&pane.grid)
+                                .scrollback_offset(pane.scrollback_offset)
+                                .selection(pane.selection.as_ref())
+                                .search_matches(&search_matches, search_state.current_match);
+                            frame.render_widget(view, term_area);
+                        }
+                    } else {
                     // Multiple tiled panes — compute layout rects with styled borders
                     let mux_area = MuxRect {
                         x: term_area.x,
@@ -395,9 +567,22 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                         let inner = block.inner(pane_area);
                         frame.render_widget(block, pane_area);
 
+                        // Prepare search matches for this pane
+                        let search_matches: Vec<UiSearchMatch> = if overlay == Overlay::Search {
+                            search_state.matches.iter().map(|m| UiSearchMatch {
+                                row: m.row,
+                                col: m.col,
+                                len: m.len,
+                            }).collect()
+                        } else {
+                            Vec::new()
+                        };
+
                         let view = TerminalView::new(&pane.grid)
                             .show_cursor(pane.focused)
-                            .scrollback_offset(pane.scrollback_offset);
+                            .scrollback_offset(pane.scrollback_offset)
+                            .selection(pane.selection.as_ref())
+                            .search_matches(&search_matches, search_state.current_match);
                         frame.render_widget(view, inner);
                     }
                 }
@@ -502,10 +687,24 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                     let inner = block.inner(*float_area);
                     frame.render_widget(block, *float_area);
 
+                    // Prepare search matches for this pane
+                    let search_matches: Vec<UiSearchMatch> = if overlay == Overlay::Search {
+                        search_state.matches.iter().map(|m| UiSearchMatch {
+                            row: m.row,
+                            col: m.col,
+                            len: m.len,
+                        }).collect()
+                    } else {
+                        Vec::new()
+                    };
+
                     let view = TerminalView::new(&pane.grid)
                         .show_cursor(pane.focused)
-                        .scrollback_offset(*scrollback_offset);
+                        .scrollback_offset(*scrollback_offset)
+                        .selection(pane.selection.as_ref())
+                        .search_matches(&search_matches, search_state.current_match);
                     frame.render_widget(view, inner);
+                }
                 }
             }
 
@@ -592,6 +791,98 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                         CommandPalette::new(&filtered_commands, palette_selected, &palette_filter);
                     frame.render_widget(palette, area);
                 }
+                Overlay::Search => {
+                    // Render search bar at bottom
+                    let search_height = 3u16;
+                    let search_area = ratatui::layout::Rect {
+                        x: 0,
+                        y: area.height.saturating_sub(search_height),
+                        width: area.width,
+                        height: search_height,
+                    };
+                    
+                    // Clear area
+                    for y in search_area.y..search_area.y + search_area.height {
+                        for x in search_area.x..search_area.x + search_area.width {
+                            if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                                cell.set_char(' ');
+                                cell.set_style(Style::default().bg(Color::Rgb(49, 50, 68)));
+                            }
+                        }
+                    }
+                    
+                    // Draw search bar
+                    let match_text = if search_state.matches.is_empty() {
+                        "No matches".to_string()
+                    } else {
+                        format!("{}/{}", search_state.current_match + 1, search_state.matches.len())
+                    };
+                    
+                    let search_text = format!("Search: {} {}", search_state.query, match_text);
+                    
+                    // Draw border
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Rgb(137, 180, 250)))
+                        .title(Span::styled(" Find ", Style::default().fg(Color::Rgb(205, 214, 244))));
+                    
+                    frame.render_widget(block, search_area);
+                    
+                    // Draw text
+                    let inner = search_area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
+                    for (i, ch) in search_text.chars().enumerate() {
+                        let x = inner.x + i as u16;
+                        if x < inner.x + inner.width {
+                            if let Some(cell) = frame.buffer_mut().cell_mut((x, inner.y + 1)) {
+                                cell.set_char(ch);
+                                cell.set_style(Style::default().fg(Color::Rgb(205, 214, 244)));
+                            }
+                        }
+                    }
+                }
+                Overlay::TabRename { .. } => {
+                    // Render rename dialog at bottom
+                    let rename_height = 3u16;
+                    let rename_area = ratatui::layout::Rect {
+                        x: 0,
+                        y: area.height.saturating_sub(rename_height),
+                        width: area.width,
+                        height: rename_height,
+                    };
+                    
+                    // Clear area
+                    for y in rename_area.y..rename_area.y + rename_area.height {
+                        for x in rename_area.x..rename_area.x + rename_area.width {
+                            if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                                cell.set_char(' ');
+                                cell.set_style(Style::default().bg(Color::Rgb(49, 50, 68)));
+                            }
+                        }
+                    }
+                    
+                    // Draw rename bar
+                    let rename_text = format!("Rename tab: {}", tab_rename_buffer);
+                    
+                    // Draw border
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Rgb(245, 194, 231))) // Pink for rename
+                        .title(Span::styled(" Rename Tab ", Style::default().fg(Color::Rgb(205, 214, 244))));
+                    
+                    frame.render_widget(block, rename_area);
+                    
+                    // Draw text
+                    let inner = rename_area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 });
+                    for (i, ch) in rename_text.chars().enumerate() {
+                        let x = inner.x + i as u16;
+                        if x < inner.x + inner.width {
+                            if let Some(cell) = frame.buffer_mut().cell_mut((x, inner.y + 1)) {
+                                cell.set_char(ch);
+                                cell.set_style(Style::default().fg(Color::Rgb(205, 214, 244)));
+                            }
+                        }
+                    }
+                }
                 Overlay::None => {}
             }
         })?;
@@ -668,6 +959,76 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                         palette_filter.push(c);
                                         palette_selected = 0;
                                         filtered_commands = filter_commands(&commands, &palette_filter, &recent_commands);
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+                            Overlay::Search => {
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        overlay = Overlay::None;
+                                        search_state.clear();
+                                    }
+                                    KeyCode::Enter => {
+                                        // Jump to next match
+                                        if let Some(tab) = session.active_tab() {
+                                            if let Some(pane) = tab.focused_pane() {
+                                                search_state.find_matches(pane);
+                                                if let Some(m) = search_state.next_match() {
+                                                    // Could scroll to match here
+                                                }
+                                            }
+                                        }
+                                    }
+                                    KeyCode::F(3) => {
+                                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                            search_state.prev_match();
+                                        } else {
+                                            search_state.next_match();
+                                        }
+                                    }
+                                    KeyCode::Backspace => {
+                                        search_state.query.pop();
+                                        if let Some(tab) = session.active_tab() {
+                                            if let Some(pane) = tab.focused_pane() {
+                                                search_state.find_matches(pane);
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Char(c) => {
+                                        search_state.query.push(c);
+                                        if let Some(tab) = session.active_tab() {
+                                            if let Some(pane) = tab.focused_pane() {
+                                                search_state.find_matches(pane);
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+                            Overlay::TabRename { tab_id } => {
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        overlay = Overlay::None;
+                                        tab_rename_buffer.clear();
+                                    }
+                                    KeyCode::Enter => {
+                                        // Apply the rename
+                                        if let Some(tab) = session.tabs.iter_mut().find(|t| t.id == *tab_id) {
+                                            if !tab_rename_buffer.is_empty() {
+                                                tab.name = tab_rename_buffer.clone();
+                                            }
+                                        }
+                                        overlay = Overlay::None;
+                                        tab_rename_buffer.clear();
+                                    }
+                                    KeyCode::Backspace => {
+                                        tab_rename_buffer.pop();
+                                    }
+                                    KeyCode::Char(c) => {
+                                        tab_rename_buffer.push(c);
                                     }
                                     _ => {}
                                 }
@@ -1041,8 +1402,37 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     }
                                 }
                                 KeyCode::Char(c) => {
+                                    // Ctrl+V = paste from clipboard (check for 'v' or SYN char \x16)
+                                    let is_paste = key.modifiers.contains(KeyModifiers::CONTROL) 
+                                        && (c == 'v' || c == '\x16');
+                                    
+                                    if is_paste {
+                                        tracing::debug!("Paste triggered with Ctrl+V");
+                                        match paste_from_clipboard() {
+                                            Ok(text) => {
+                                                tracing::debug!("Paste successful, text length: {}", text.len());
+                                                // Insert the pasted text into the current field
+                                                for ch in text.chars() {
+                                                    if !matches!(ai_sidebar.focused_field,
+                                                        AiSidebarField::SaveButton |
+                                                        AiSidebarField::SaveToKeyring |
+                                                        AiSidebarField::TestConnection |
+                                                        AiSidebarField::StartChatButton)
+                                                    {
+                                                        ai_sidebar.push_char(ch);
+                                                    }
+                                                }
+                                                ai_sidebar.dirty = true;
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("Failed to paste from clipboard: {}", e);
+                                                push_notification(&mut notifications, 
+                                                    format!("Paste failed: {}", e), 3000);
+                                            }
+                                        }
+                                        continue;
                                     // Ctrl+W = close sidebar
-                                    if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'w' {
+                                    } else if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'w' {
                                         ai_sidebar.visible = false;
                                         focus = Focus::Terminal;
                                         let area = compute_pane_area(
@@ -1251,8 +1641,28 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                         tab.toggle_float(area);
                                     }
                                 }
-                                Action::Search | Action::Fullscreen => {
+                                Action::ToggleMaximize => {
+                                    if let Some(tab) = session.active_tab_mut() {
+                                        tab.toggle_maximize();
+                                    }
+                                }
+                                Action::Search => {
+                                    overlay = Overlay::Search;
+                                    if let Some(tab) = session.active_tab() {
+                                        if let Some(pane) = tab.focused_pane() {
+                                            search_state.find_matches(pane);
+                                        }
+                                    }
+                                }
+                                Action::Fullscreen => {
                                     tracing::debug!("action {:?} not yet implemented", action);
+                                }
+                                Action::RenameTab => {
+                                    if let Some(tab) = session.active_tab() {
+                                        let tab_id = tab.id;
+                                        tab_rename_buffer = tab.name.clone();
+                                        overlay = Overlay::TabRename { tab_id };
+                                    }
                                 }
                                 Action::RawInput(data) => {
                                     if let Some(tab) = session.active_tab_mut() {
@@ -1262,7 +1672,7 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                 // Already handled above
                                 Action::Quit | Action::ShowHelp | Action::CommandPalette
                                 | Action::ToggleFileBrowser | Action::ToggleAiSidebar
-                                | Action::NewAiChat | Action::OpenFolder(_) => {}
+                                | Action::NewAiChat | Action::OpenFolder(_) | Action::RenameTab => {}
                             }
                         } else {
                             // Forward key to active pane
@@ -1296,7 +1706,52 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                             // ── Handle active drag of a floating pane ──
                             match mouse.kind {
                                 MouseEventKind::Drag(MouseButton::Left) => {
-                                    // Editor pane drag takes priority
+                                    // Split resize takes priority over other drags
+                                    if let Some(ref resize) = split_resizing {
+                                        if let Some(tab) = session.active_tab_mut() {
+                                            if let Some(direction) = tab.layout.split_direction() {
+                                                let dx = mouse.column as f32 - resize.start_x as f32;
+                                                let dy = mouse.row as f32 - resize.start_y as f32;
+                                                
+                                                // Get terminal area for calculating ratios
+                                                if let Ok(size) = terminal.size() {
+                                                    let term_area = MuxRect {
+                                                        x: sidebar_w,
+                                                        y: chrome_y,
+                                                        width: size.width.saturating_sub(sidebar_w + ai_right_w),
+                                                        height: size.height.saturating_sub(chrome_y + if show_status_bar { 1 } else { 0 }),
+                                                    };
+                                                    
+                                                    let delta_ratio = match direction {
+                                                        SplitDirection::Vertical => {
+                                                            dx / term_area.width as f32
+                                                        }
+                                                        SplitDirection::Horizontal => {
+                                                            dy / term_area.height as f32
+                                                        }
+                                                    };
+                                                    
+                                                    // Apply delta to current ratios, not initial
+                                                    if let Some(ref ratios) = tab.layout.ratios() {
+                                                        if resize.pane_idx + 1 < ratios.len() {
+                                                            let current_first = ratios[resize.pane_idx];
+                                                            let current_second = ratios[resize.pane_idx + 1];
+                                                            let new_first = (current_first + delta_ratio).max(0.05);
+                                                            let new_second = (current_second - delta_ratio).max(0.05);
+                                                            
+                                                            // Only update if ratios are valid
+                                                            if new_first > 0.0 && new_second > 0.0 {
+                                                                tab.layout.adjust_ratio(resize.pane_idx, delta_ratio);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    
+                                    // Editor pane drag
                                     if let Some(ref ed) = editor_dragging {
                                         let eid = ed.editor_id;
                                         let ox = ed.offset_x;
@@ -1324,8 +1779,27 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                     }
                                 }
                                 MouseEventKind::Up(MouseButton::Left) => {
+                                    // Handle text selection end
+                                    if let Some(ref sel_drag) = selection_dragging {
+                                        let pid = sel_drag.pane_id;
+                                        if let Some(tab) = session.active_tab() {
+                                            if let Some(pane) = tab.panes.iter().find(|p| p.id == pid) {
+                                                if let Some(text) = pane.selected_text() {
+                                                    if !text.is_empty() {
+                                                        // Copy to clipboard
+                                                        if let Err(e) = copy_to_clipboard(&text) {
+                                                            tracing::warn!("Failed to copy to clipboard: {}", e);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
                                     dragging = None;
                                     editor_dragging = None;
+                                    split_resizing = None;
+                                    selection_dragging = None;
                                     continue;
                                 }
                                 _ => {}
@@ -1408,8 +1882,21 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                             // ── AI sidebar area (right) ──
                             let term_width = terminal.size().map(|s| s.width).unwrap_or(80);
                             if ai_sidebar.visible && mouse.column >= term_width.saturating_sub(ai_right_w) {
-                                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                                    focus = Focus::AiSidebar;
+                                match mouse.kind {
+                                    MouseEventKind::Down(MouseButton::Left) => {
+                                        focus = Focus::AiSidebar;
+                                    }
+                                    MouseEventKind::ScrollUp => {
+                                        // Navigate up through AI sidebar fields
+                                        focus = Focus::AiSidebar;
+                                        ai_sidebar.focus_prev();
+                                    }
+                                    MouseEventKind::ScrollDown => {
+                                        // Navigate down through AI sidebar fields
+                                        focus = Focus::AiSidebar;
+                                        ai_sidebar.focus_next();
+                                    }
+                                    _ => {}
                                 }
                                 continue;
                             }
@@ -1494,11 +1981,11 @@ pub async fn run(mut cfg: AppConfig) -> anyhow::Result<()> {
                                         }
                                     } else {
                                         // No floating pane hit — delegate to tiled pane handling
-                                        handle_mouse_event(&mut session, mouse, show_tab_bar, sidebar_w);
+                                        handle_mouse_event(&mut session, mouse, show_tab_bar, sidebar_w, &mut split_resizing, &mut selection_dragging);
                                     }
                                 }
                             } else {
-                                handle_mouse_event(&mut session, mouse, show_tab_bar, sidebar_w);
+                                handle_mouse_event(&mut session, mouse, show_tab_bar, sidebar_w, &mut split_resizing, &mut selection_dragging);
                             }
                         }
                     }
@@ -1545,6 +2032,7 @@ enum PaletteAction {
     Broadcast,
     FileBrowser,
     ToggleFloat,
+    ToggleMaximize,
     AiSidebar,
     NewAiChat,
 }
@@ -1564,6 +2052,7 @@ fn palette_action_for(cmd: &CommandEntry) -> Option<PaletteAction> {
         "Help" => Some(PaletteAction::Help),
         "File Browser" => Some(PaletteAction::FileBrowser),
         "Toggle Floating" => Some(PaletteAction::ToggleFloat),
+        "Toggle Maximize" => Some(PaletteAction::ToggleMaximize),
         "AI Sidebar" => Some(PaletteAction::AiSidebar),
         "New AI Chat" => Some(PaletteAction::NewAiChat),
         "Quit" => Some(PaletteAction::Quit),
@@ -1686,6 +2175,11 @@ fn execute_palette_action(
             let area = compute_pane_area(terminal, show_tab_bar, show_status_bar, left_w, right_w);
             if let Some(tab) = session.active_tab_mut() {
                 tab.toggle_float(area);
+            }
+        }
+        PaletteAction::ToggleMaximize => {
+            if let Some(tab) = session.active_tab_mut() {
+                tab.toggle_maximize();
             }
         }
     }
@@ -1867,6 +2361,127 @@ fn open_folder_in_pane(
     }
 }
 
+/// Copy text to the system clipboard.
+fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
+    use std::process::Command;
+    
+    // Try wl-copy first (Wayland), then xclip (X11), then pbcopy (macOS)
+    #[cfg(target_os = "linux")]
+    {
+        // Try wl-copy first
+        if Command::new("wl-copy").arg(text).spawn().is_ok() {
+            return Ok(());
+        }
+        // Fall back to xclip
+        if let Ok(mut child) = Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(std::process::Stdio::piped())
+            .spawn() 
+        {
+            if let Some(stdin) = child.stdin.as_mut() {
+                use std::io::Write;
+                stdin.write_all(text.as_bytes())?;
+            }
+            return Ok(());
+        }
+    }
+    
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(mut child) = Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn() 
+        {
+            if let Some(stdin) = child.stdin.as_mut() {
+                use std::io::Write;
+                stdin.write_all(text.as_bytes())?;
+            }
+            return Ok(());
+        }
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(mut child) = Command::new("powershell")
+            .args([
+                "-Command",
+                &format!("Set-Clipboard -Value '{}'", text.replace("'", "''"))
+            ])
+            .spawn() 
+        {
+            return Ok(());
+        }
+    }
+    
+    Err(anyhow::anyhow!("No clipboard utility available"))
+}
+
+/// Read text from the system clipboard with timeout.
+fn paste_from_clipboard() -> anyhow::Result<String> {
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+    use std::thread;
+    
+    // Spawn clipboard access in a separate thread with timeout
+    let result = thread::spawn(|| {
+        #[cfg(target_os = "linux")]
+        {
+            // Try wl-paste first (Wayland)
+            if let Ok(output) = Command::new("wl-paste").output() {
+                if output.status.success() {
+                    return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+                }
+            }
+            // Fall back to xclip
+            if let Ok(output) = Command::new("xclip")
+                .args(["-selection", "clipboard", "-o"])
+                .output() 
+            {
+                if output.status.success() {
+                    return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+                }
+            }
+        }
+        
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(output) = Command::new("pbpaste").output() {
+                if output.status.success() {
+                    return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+                }
+            }
+        }
+        
+        #[cfg(target_os = "windows")]
+        {
+            // Use cmd.exe to run PowerShell command - more reliable
+            if let Ok(output) = Command::new("cmd.exe")
+                .args([
+                    "/c",
+                    "powershell.exe -NoProfile -Command \"Get-Clipboard\""
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output() 
+            {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout).to_string();
+                    return Ok(text.trim_end().to_string());
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!("No clipboard utility available"))
+    })
+    .join();
+    
+    match result {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(anyhow::anyhow!("Clipboard access timed out or panicked")),
+    }
+}
+
 /// Compute the pane area accounting for chrome and both sidebars.
 fn compute_pane_area(
     terminal: &Terminal<CrosstermBackend<io::Stdout>>,
@@ -1908,24 +2523,40 @@ fn compute_screen_area(
 
 /// Spawn a new terminal pane/tab running the configured AI chat command.
 fn spawn_ai_chat_pane(session: &mut Session, ai_sidebar: &AiSidebarState, area: MuxRect) {
-    let chat_cmd = ai_sidebar.build_chat_command();
-    // Wrap in a shell so we can use env exports + logical-or fallback
-    let shell_cmd = format!("bash -c \"{}\"", chat_cmd.replace('"', "\\\""));
-    // Try to create a tab; fall back to running the command in the current tab
     let model = if ai_sidebar.model.is_empty() {
         ai_sidebar.provider.default_model().to_string()
     } else {
         ai_sidebar.model.clone()
     };
     let tab_name = format!("AI:{}", model);
-    if let Ok(tab_id) = session.create_tab(&shell_cmd, area) {
-        if let Some(tab) = session.tabs.iter_mut().find(|t| t.id == tab_id) {
-            tab.name = tab_name.clone();
-            if let Some(pane) = tab.focused_pane_mut() {
-                pane.grid.title = tab_name;
+    
+    // Build platform-specific command
+    let shell_cmd = if cfg!(target_os = "windows") {
+        // On Windows, use cmd with a simple approach - just run opencode or aichat
+        // Environment variables need to be set differently on Windows
+        let cmd = "opencode";
+        format!("{}", cmd)
+    } else {
+        // On Unix/Linux/macOS, use bash
+        let chat_cmd = ai_sidebar.build_chat_command();
+        format!("bash -c \"{}\"", chat_cmd.replace('"', "\\\""))
+    };
+    
+    tracing::info!("Spawning AI chat with command: {}", shell_cmd);
+    
+    match session.create_tab(&shell_cmd, area) {
+        Ok(tab_id) => {
+            if let Some(tab) = session.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.name = tab_name.clone();
+                if let Some(pane) = tab.focused_pane_mut() {
+                    pane.grid.title = tab_name;
+                }
             }
+            session.active_tab = Some(tab_id);
         }
-        session.active_tab = Some(tab_id);
+        Err(e) => {
+            tracing::error!("Failed to create AI chat tab: {}", e);
+        }
     }
 }
 
@@ -2152,11 +2783,18 @@ fn handle_mouse_event(
     mouse: crossterm::event::MouseEvent,
     show_tab_bar: bool,
     sidebar_offset: u16,
+    split_resizing: &mut Option<SplitResizeState>,
+    selection_dragging: &mut Option<SelectionDragState>,
 ) {
     let tab = match session.active_tab_mut() {
         Some(t) => t,
         None => return,
     };
+
+    // Skip if a pane is maximized
+    if tab.has_maximized_pane() {
+        return;
+    }
 
     let offset_y = if show_tab_bar { 1u16 } else { 0 };
     let mx = mouse.column.saturating_sub(sidebar_offset);
@@ -2164,19 +2802,96 @@ fn handle_mouse_event(
 
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            // Check if clicking on a border between panes
+            if let Some(direction) = tab.layout.split_direction() {
+                let tiled_panes: Vec<_> = tab.panes.iter().filter(|p| !p.is_floating).collect();
+                if tiled_panes.len() >= 2 {
+                    // Check for borders between adjacent panes
+                    for (i, window) in tiled_panes.windows(2).enumerate() {
+                        let first = &window[0];
+                        let _second = &window[1];
+                        
+                        let on_border = match direction {
+                            SplitDirection::Vertical => {
+                                // Border is at the right edge of first pane
+                                let border_x = first.rect.x + first.rect.width;
+                                mx >= border_x.saturating_sub(1) && mx <= border_x + 1
+                                    && my >= first.rect.y && my < first.rect.y + first.rect.height
+                            }
+                            SplitDirection::Horizontal => {
+                                // Border is at the bottom edge of first pane
+                                let border_y = first.rect.y + first.rect.height;
+                                my >= border_y.saturating_sub(1) && my <= border_y + 1
+                                    && mx >= first.rect.x && mx < first.rect.x + first.rect.width
+                            }
+                        };
+                        
+                        if on_border {
+                            // Start split resize drag
+                            *split_resizing = Some(SplitResizeState {
+                                pane_idx: i,
+                                start_x: mouse.column,
+                                start_y: mouse.row,
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+            
+            // Not on a border, handle as normal pane click (potential text selection start)
             let mut target_pane_id = None;
+            let mut click_row = 0usize;
+            let mut click_col = 0usize;
+            
             for pane in &tab.panes {
                 let r = &pane.rect;
                 if mx >= r.x && mx < r.x + r.width && my >= r.y && my < r.y + r.height {
                     target_pane_id = Some(pane.id);
+                    // Calculate row/col within pane (accounting for borders if any)
+                    click_col = (mx - r.x) as usize;
+                    click_row = (my - r.y) as usize;
                     break;
                 }
             }
+            
             if let Some(pid) = target_pane_id {
                 for pane in &mut tab.panes {
                     pane.focused = pane.id == pid;
+                    // Clear any existing selection when clicking
+                    if pane.id == pid {
+                        pane.clear_selection();
+                    }
                 }
                 tab.active_pane = Some(pid);
+                
+                // Start selection drag
+                *selection_dragging = Some(SelectionDragState {
+                    pane_id: pid,
+                    start_row: click_row,
+                    start_col: click_col,
+                });
+                
+                // Initialize selection in the pane
+                if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pid) {
+                    pane.start_selection(click_row, click_col);
+                }
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            // Handle text selection dragging
+            if let Some(sel_drag) = selection_dragging {
+                let pid = sel_drag.pane_id;
+                
+                // Find the pane and update selection
+                if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == pid) {
+                    let r = &pane.rect;
+                    if mx >= r.x && mx < r.x + r.width && my >= r.y && my < r.y + r.height {
+                        let col = (mx - r.x) as usize;
+                        let row = (my - r.y) as usize;
+                        pane.update_selection(row, col);
+                    }
+                }
             }
         }
         MouseEventKind::ScrollUp => {

@@ -20,6 +20,10 @@ pub enum Action {
     ToggleBroadcast,
     Search,
     Fullscreen,
+    /// Toggle maximized state for the focused pane.
+    ToggleMaximize,
+    /// Rename the current tab.
+    RenameTab,
     /// Show help / tutorial overlay.
     ShowHelp,
     /// Open command palette overlay.
@@ -57,92 +61,162 @@ impl InputHandler {
 
         // Ctrl+Q = Quit
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('q'), modifiers: KeyModifiers::CONTROL },
+            KeyBinding {
+                code: KeyCode::Char('q'),
+                modifiers: KeyModifiers::CONTROL,
+            },
             Action::Quit,
         );
         // Ctrl+N = New pane (vertical split)
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('n'), modifiers: KeyModifiers::CONTROL },
+            KeyBinding {
+                code: KeyCode::Char('n'),
+                modifiers: KeyModifiers::CONTROL,
+            },
             Action::NewPane,
         );
         // Ctrl+W = Close pane
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('w'), modifiers: KeyModifiers::CONTROL },
+            KeyBinding {
+                code: KeyCode::Char('w'),
+                modifiers: KeyModifiers::CONTROL,
+            },
             Action::ClosePane,
         );
         // Ctrl+Tab = Next tab
         bindings.insert(
-            KeyBinding { code: KeyCode::Tab, modifiers: KeyModifiers::CONTROL },
+            KeyBinding {
+                code: KeyCode::Tab,
+                modifiers: KeyModifiers::CONTROL,
+            },
             Action::NextTab,
         );
         // Ctrl+T = New tab
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('t'), modifiers: KeyModifiers::CONTROL },
+            KeyBinding {
+                code: KeyCode::Char('t'),
+                modifiers: KeyModifiers::CONTROL,
+            },
             Action::NewTab,
         );
         // Ctrl+F = Search
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('f'), modifiers: KeyModifiers::CONTROL },
+            KeyBinding {
+                code: KeyCode::Char('f'),
+                modifiers: KeyModifiers::CONTROL,
+            },
             Action::Search,
         );
         // Alt+H = Split horizontal (top/bottom)
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('h'), modifiers: KeyModifiers::ALT },
+            KeyBinding {
+                code: KeyCode::Char('h'),
+                modifiers: KeyModifiers::ALT,
+            },
             Action::SplitHorizontal,
         );
         // Alt+V = Split vertical (left/right)
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('v'), modifiers: KeyModifiers::ALT },
+            KeyBinding {
+                code: KeyCode::Char('v'),
+                modifiers: KeyModifiers::ALT,
+            },
             Action::SplitVertical,
         );
         // Alt+Right = Focus next pane
         bindings.insert(
-            KeyBinding { code: KeyCode::Right, modifiers: KeyModifiers::ALT },
+            KeyBinding {
+                code: KeyCode::Right,
+                modifiers: KeyModifiers::ALT,
+            },
             Action::NextPane,
         );
         // Alt+Left = Focus previous pane
         bindings.insert(
-            KeyBinding { code: KeyCode::Left, modifiers: KeyModifiers::ALT },
+            KeyBinding {
+                code: KeyCode::Left,
+                modifiers: KeyModifiers::ALT,
+            },
             Action::PrevPane,
         );
         // Alt+B = Toggle broadcast mode
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('b'), modifiers: KeyModifiers::ALT },
+            KeyBinding {
+                code: KeyCode::Char('b'),
+                modifiers: KeyModifiers::ALT,
+            },
             Action::ToggleBroadcast,
         );
         // Ctrl+Shift+Tab = Previous tab
         bindings.insert(
-            KeyBinding { code: KeyCode::BackTab, modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT },
+            KeyBinding {
+                code: KeyCode::BackTab,
+                modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            },
             Action::PrevTab,
         );
         // F1 = Show help overlay
         bindings.insert(
-            KeyBinding { code: KeyCode::F(1), modifiers: KeyModifiers::NONE },
+            KeyBinding {
+                code: KeyCode::F(1),
+                modifiers: KeyModifiers::NONE,
+            },
             Action::ShowHelp,
         );
         // Ctrl+P = Command palette
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('p'), modifiers: KeyModifiers::CONTROL },
+            KeyBinding {
+                code: KeyCode::Char('p'),
+                modifiers: KeyModifiers::CONTROL,
+            },
             Action::CommandPalette,
         );
         // Ctrl+E = Toggle file browser
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('e'), modifiers: KeyModifiers::CONTROL },
+            KeyBinding {
+                code: KeyCode::Char('e'),
+                modifiers: KeyModifiers::CONTROL,
+            },
             Action::ToggleFileBrowser,
         );
         // Alt+F = Toggle floating pane
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('f'), modifiers: KeyModifiers::ALT },
+            KeyBinding {
+                code: KeyCode::Char('f'),
+                modifiers: KeyModifiers::ALT,
+            },
             Action::ToggleFloat,
+        );
+        // Alt+M = Toggle maximize pane
+        bindings.insert(
+            KeyBinding {
+                code: KeyCode::Char('m'),
+                modifiers: KeyModifiers::ALT,
+            },
+            Action::ToggleMaximize,
+        );
+        // Alt+R = Rename current tab
+        bindings.insert(
+            KeyBinding {
+                code: KeyCode::Char('r'),
+                modifiers: KeyModifiers::ALT,
+            },
+            Action::RenameTab,
         );
         // Alt+A = Toggle AI sidebar
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('a'), modifiers: KeyModifiers::ALT },
+            KeyBinding {
+                code: KeyCode::Char('a'),
+                modifiers: KeyModifiers::ALT,
+            },
             Action::ToggleAiSidebar,
         );
         // Alt+I = New AI chat pane (quick-launch without sidebar)
         bindings.insert(
-            KeyBinding { code: KeyCode::Char('i'), modifiers: KeyModifiers::ALT },
+            KeyBinding {
+                code: KeyCode::Char('i'),
+                modifiers: KeyModifiers::ALT,
+            },
             Action::NewAiChat,
         );
 

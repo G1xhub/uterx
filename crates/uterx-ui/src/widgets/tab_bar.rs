@@ -77,12 +77,12 @@ impl<'a> Widget for TabBar<'a> {
             let style = if tab.active {
                 Style::default()
                     .fg(Color::Rgb(205, 214, 244)) // Catppuccin text
-                    .bg(Color::Rgb(49, 50, 68))    // Catppuccin surface0
+                    .bg(Color::Rgb(49, 50, 68)) // Catppuccin surface0
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
                     .fg(Color::Rgb(108, 112, 134)) // Catppuccin overlay0
-                    .bg(Color::Rgb(30, 30, 46))    // Catppuccin base
+                    .bg(Color::Rgb(30, 30, 46)) // Catppuccin base
             };
 
             buf.set_string(x, area.y, &label, style);

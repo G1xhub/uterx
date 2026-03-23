@@ -7,4 +7,4 @@ pub mod input;
 pub mod terminal_view;
 pub mod widgets;
 
-pub use terminal_view::TerminalView;
+pub use terminal_view::{SearchMatch, TerminalView};

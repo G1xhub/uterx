@@ -270,6 +270,7 @@ impl AiSidebarState {
 
     /// Build the shell command to launch an AI chat session.
     /// Returns a shell command string (e.g. `export ANTHROPIC_API_KEY='...'; opencode`).
+    /// Build environment variable exports for the chat command.
     pub fn build_chat_command(&self) -> String {
         let model = if self.model.is_empty() {
             self.provider.default_model().to_string()
@@ -277,10 +278,99 @@ impl AiSidebarState {
             self.model.clone()
         };
 
+        if cfg!(target_os = "windows") {
+            self.build_chat_command_windows(&model)
+        } else {
+            self.build_chat_command_unix(&model)
+        }
+    }
+
+    fn build_chat_command_windows(&self, model: &str) -> String {
+        // Escape single quotes for PowerShell
+        let safe_key = self.api_key.replace('\'', "''");
+
+        let env_exports = match self.provider {
+            AiProvider::Anthropic => {
+                format!(
+                    "$env:ANTHROPIC_API_KEY='{}'; $env:ANTHROPIC_MODEL='{}'",
+                    safe_key, model
+                )
+            }
+            AiProvider::OpenAi => {
+                format!(
+                    "$env:OPENAI_API_KEY='{}'; $env:OPENAI_MODEL='{}'",
+                    safe_key, model
+                )
+            }
+            AiProvider::Ollama => {
+                let base = if self.base_url.is_empty() {
+                    "http://localhost:11434".to_string()
+                } else {
+                    self.base_url.clone()
+                };
+                format!(
+                    "$env:OLLAMA_HOST='{}'; $env:OPENAI_BASE_URL='{}/v1'; $env:OPENAI_MODEL='{}'",
+                    base, base, model
+                )
+            }
+            AiProvider::Custom => {
+                format!(
+                    "$env:OPENAI_API_KEY='{}'; $env:OPENAI_BASE_URL='{}'; $env:OPENAI_MODEL='{}'",
+                    safe_key, self.base_url, model
+                )
+            }
+            AiProvider::ZAi => {
+                let base = if self.base_url.is_empty() {
+                    "https://api.z.ai".to_string()
+                } else {
+                    self.base_url.clone()
+                };
+                format!(
+                    "$env:ZAI_API_KEY='{}'; $env:OPENAI_BASE_URL='{}/v1'; $env:OPENAI_MODEL='{}'",
+                    safe_key, base, model
+                )
+            }
+            AiProvider::Kimi => {
+                let base = if self.base_url.is_empty() {
+                    "https://api.moonshot.cn".to_string()
+                } else {
+                    self.base_url.clone()
+                };
+                format!(
+                    "$env:KIMI_API_KEY='{}'; $env:OPENAI_BASE_URL='{}/v1'; $env:OPENAI_MODEL='{}'",
+                    safe_key, base, model
+                )
+            }
+        };
+
+        let launcher = match self.provider {
+            AiProvider::Ollama => {
+                format!(
+                    "if (Get-Command opencode -ErrorAction SilentlyContinue) {{ opencode }} \
+                     elseif (Get-Command aichat -ErrorAction SilentlyContinue) {{ aichat }} \
+                     elseif (Get-Command ollama -ErrorAction SilentlyContinue) {{ ollama run '{}' }} \
+                     else {{ Write-Host 'Install opencode, aichat, or ollama for AI chat' }}",
+                    model
+                )
+            }
+            _ => {
+                "if (Get-Command opencode -ErrorAction SilentlyContinue) { opencode } \
+                 elseif (Get-Command aichat -ErrorAction SilentlyContinue) { aichat } \
+                 elseif (Get-Command llm -ErrorAction SilentlyContinue) { llm chat } \
+                 elseif (Get-Command sgpt -ErrorAction SilentlyContinue) { sgpt --chat } \
+                 else { Write-Host 'Install opencode or aichat for AI chat (https://opencode.ai)' }"
+                    .to_string()
+            }
+        };
+
+        format!("{}; {}", env_exports, launcher)
+    }
+
+    fn build_chat_command_unix(&self, model: &str) -> String {
         // Escape single quotes in the key to prevent shell injection
         let safe_key = self.api_key.replace('\'', "'\\''");
 
-        let mut env_exports = match self.provider {
+        let env_exports = match self.provider {
             AiProvider::Anthropic => {
                 format!(
                     "export ANTHROPIC_API_KEY='{}'; export ANTHROPIC_MODEL='{}'",
@@ -334,23 +424,21 @@ impl AiSidebarState {
             }
         };
 
-        // Try to detect available AI CLI tools and launch the best one.
-        // Priority: opencode > aichat > llm > sgpt > ollama (for Ollama provider)
         let launcher = match self.provider {
             AiProvider::Ollama => {
                 format!(
-                    "command -v opencode >/dev/null 2>&1 && opencode \
-                     || command -v aichat >/dev/null 2>&1 && aichat \
-                     || command -v ollama >/dev/null 2>&1 && ollama run '{}' \
-                     || echo 'Install opencode, aichat, or ollama for AI chat'",
+                    "command -v opencode > /dev/null 2>&1 && opencode || \
+                     command -v aichat > /dev/null 2>&1 && aichat || \
+                     command -v ollama > /dev/null 2>&1 && ollama run '{}' || \
+                     echo 'Install opencode, aichat, or ollama for AI chat'",
                     model
                 )
             }
-            _ => "command -v opencode >/dev/null 2>&1 && opencode \
-                 || command -v aichat >/dev/null 2>&1 && aichat \
-                 || command -v llm >/dev/null 2>&1 && llm chat \
-                 || command -v sgpt >/dev/null 2>&1 && sgpt --chat \
-                 || echo 'Install opencode or aichat for AI chat (https://opencode.ai)'"
+            _ => "command -v opencode > /dev/null 2>&1 && opencode || \
+                 command -v aichat > /dev/null 2>&1 && aichat || \
+                 command -v llm > /dev/null 2>&1 && llm chat || \
+                 command -v sgpt > /dev/null 2>&1 && sgpt --chat || \
+                 echo 'Install opencode or aichat for AI chat (https://opencode.ai)'"
                 .to_string(),
         };
 
@@ -496,7 +584,9 @@ impl<'a> Widget for AiSidebarWidget<'a> {
             let content = format!("{}{}", ind, masked);
             let padded = format!("{:<width$}", content, width = inner_w);
             let s = Style::default().fg(fg).bg(field_bg);
-            buf.set_string(inner_x, y, &padded[..padded.len().min(inner_w)], s);
+            // Use char-based slicing to avoid breaking unicode characters
+            let visible_chars: String = padded.chars().take(inner_w as usize).collect();
+            buf.set_string(inner_x, y, &visible_chars, s);
         }
         y += 2;
 
@@ -519,7 +609,8 @@ impl<'a> Widget for AiSidebarWidget<'a> {
             let content = format!("{}{}", ind, model_text);
             let padded = format!("{:<width$}", content, width = inner_w);
             let s = Style::default().fg(fg).bg(field_bg);
-            buf.set_string(inner_x, y, &padded[..padded.len().min(inner_w)], s);
+            let visible_chars: String = padded.chars().take(inner_w as usize).collect();
+            buf.set_string(inner_x, y, &visible_chars, s);
         }
         y += 2;
 
@@ -547,7 +638,8 @@ impl<'a> Widget for AiSidebarWidget<'a> {
             let content = format!("{}{}", ind, url_text);
             let padded = format!("{:<width$}", content, width = inner_w);
             let s = Style::default().fg(fg).bg(field_bg);
-            buf.set_string(inner_x, y, &padded[..padded.len().min(inner_w)], s);
+            let visible_chars: String = padded.chars().take(inner_w as usize).collect();
+            buf.set_string(inner_x, y, &visible_chars, s);
             y += 2;
         }
 
@@ -595,7 +687,8 @@ impl<'a> Widget for AiSidebarWidget<'a> {
                 "[ ] Save key to OS keyring "
             };
             let padded = format!("{:<width$}", label, width = inner_w);
-            buf.set_string(inner_x, y, &padded[..padded.len().min(inner_w)], cb_style);
+            let visible_chars: String = padded.chars().take(inner_w as usize).collect();
+            buf.set_string(inner_x, y, &visible_chars, cb_style);
         }
         y += 1;
 
@@ -633,12 +726,8 @@ impl<'a> Widget for AiSidebarWidget<'a> {
         // ── Status message ────────────────────────────────────────────────
         if let Some(ref msg) = self.state.status_msg {
             let msg_style = Style::default().fg(sky).bg(bg);
-            let truncated = if msg.len() > inner_w {
-                &msg[..inner_w]
-            } else {
-                msg
-            };
-            buf.set_string(inner_x, y, truncated, msg_style);
+            let truncated: String = msg.chars().take(inner_w as usize).collect();
+            buf.set_string(inner_x, y, &truncated, msg_style);
             y += 1;
         }
 
@@ -647,12 +736,8 @@ impl<'a> Widget for AiSidebarWidget<'a> {
         if hint_y > y {
             let hint = "Tab/↑↓:nav  ←→:provider  Esc:close";
             let hint_style = Style::default().fg(dim).bg(bg);
-            let truncated = if hint.len() > inner_w {
-                &hint[..inner_w]
-            } else {
-                hint
-            };
-            buf.set_string(inner_x, hint_y, truncated, hint_style);
+            let truncated: String = hint.chars().take(inner_w as usize).collect();
+            buf.set_string(inner_x, hint_y, &truncated, hint_style);
         }
 
         // Suppress unused variable warning

@@ -51,6 +51,7 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "Type in all panes simultaneously",
         ),
         CommandEntry::new("Toggle Floating", "Alt+F", "Float/unfloat focused pane"),
+        CommandEntry::new("Toggle Maximize", "Alt+M", "Maximize/restore focused pane"),
         // ── Sidebars ─────────────────────────────────────────────────────
         CommandEntry::new("File Browser", "Ctrl+E", "Toggle file explorer sidebar"),
         CommandEntry::new(

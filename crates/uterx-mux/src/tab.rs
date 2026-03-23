@@ -17,6 +17,9 @@ pub struct Tab {
     pub active_pane: Option<PaneId>,
     /// If true, keyboard input is broadcast to all panes.
     pub broadcast: bool,
+    /// If set, this pane is maximized and fills the entire terminal area.
+    /// Other panes are hidden while this pane is maximized.
+    pub maximized_pane: Option<PaneId>,
 }
 
 impl Tab {
@@ -28,6 +31,7 @@ impl Tab {
             layout: Layout::Single,
             active_pane: None,
             broadcast: false,
+            maximized_pane: None,
         }
     }
 
@@ -41,6 +45,7 @@ impl Tab {
             layout: Layout::Single,
             active_pane: Some(pane_id),
             broadcast: false,
+            maximized_pane: None,
         }
     }
 
@@ -58,9 +63,15 @@ impl Tab {
         self.panes.retain(|p| p.id != id);
         let removed = self.panes.len() < before;
 
-        if removed && self.active_pane == Some(id) {
-            // Focus the first remaining pane
-            self.active_pane = self.panes.first().map(|p| p.id);
+        if removed {
+            if self.active_pane == Some(id) {
+                // Focus the first remaining pane
+                self.active_pane = self.panes.first().map(|p| p.id);
+            }
+            // If the removed pane was maximized, clear the maximized state
+            if self.maximized_pane == Some(id) {
+                self.maximized_pane = None;
+            }
         }
         removed
     }
@@ -260,6 +271,45 @@ impl Tab {
             pane.rect.x = x;
             pane.rect.y = y;
         }
+    }
+
+    /// Toggle maximized state for the focused pane.
+    /// If the focused pane is already maximized, restore it.
+    /// If another pane is maximized, switch to the focused pane.
+    /// Returns true if a pane is now maximized, false otherwise.
+    pub fn toggle_maximize(&mut self) -> bool {
+        if let Some(focused_id) = self.active_pane {
+            // If currently maximized pane is the focused one, restore it
+            if self.maximized_pane == Some(focused_id) {
+                self.maximized_pane = None;
+                false
+            } else {
+                // Maximize the focused pane
+                self.maximized_pane = Some(focused_id);
+                true
+            }
+        } else {
+            // No focused pane, just clear any maximized state
+            self.maximized_pane = None;
+            false
+        }
+    }
+
+    /// Check if any pane is currently maximized.
+    pub fn has_maximized_pane(&self) -> bool {
+        self.maximized_pane.is_some()
+    }
+
+    /// Get the currently maximized pane if any.
+    pub fn maximized_pane(&self) -> Option<&Pane> {
+        self.maximized_pane
+            .and_then(|id| self.panes.iter().find(|p| p.id == id))
+    }
+
+    /// Get a mutable reference to the maximized pane if any.
+    pub fn maximized_pane_mut(&mut self) -> Option<&mut Pane> {
+        let id = self.maximized_pane?;
+        self.panes.iter_mut().find(|p| p.id == id)
     }
 }
 

@@ -553,7 +553,7 @@ impl<'a> Widget for FileBrowserWidget<'a> {
         let green = Color::Rgb(166, 227, 161); // Catppuccin green
         let yellow = Color::Rgb(249, 226, 175); // Catppuccin yellow (search match)
         let red = Color::Rgb(243, 139, 168); // Catppuccin red
-        // Search bar occupies the last row when search is active
+                                             // Search bar occupies the last row when search is active
         let search_row_reserved: u16 = if self.state.search_mode { 1 } else { 0 };
 
         // Fill background
