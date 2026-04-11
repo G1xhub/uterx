@@ -1,4 +1,4 @@
-### App Overview: Super-Terminal
+# Super-Terminal
 
 "Super-Terminal" is a highly modular, extensible terminal application designed as a hybrid terminal emulator and multiplexer. It draws heavily from Ghostty as a performant, GPU-accelerated terminal emulator and Zellij as an intuitive terminal workspace with pane management and plugin system. The goal is to create a "Terminal Desktop" – an environment where users can freely move, scale, group, or use multiple terminal windows (panes) independently, similar to a graphical desktop. The app runs natively on Windows and Linux, with a focus on speed, stability, and extensibility through plugins.
 
@@ -59,3 +59,20 @@ These plugins turn the terminal into a "super tool" that goes beyond pure comman
   - **Platform-Layer**: Abstraction for Windows (WinAPI) and Linux (GTK/TTY).
 - **Data Flow**: Central event loop processes inputs, renders panes in parallel, and delegates to plugins.
 - **Security**: Plugins isolated, no direct OS access without permission; ZK-proofs in Midnight plugin for privacy.
+
+### Development Steps
+1. **Prototyping**: Implement base emulator in Rust, with simple pane splitting.
+2. **Platform Porting**: Linux first (simpler), then Windows integration.
+3. **Plugin System**: Add WASM integration, with example plugins.
+4. **Feature Expansion**: Bluetooth/WLAN via OS APIs, Midnight via Cardano SDK.
+5. **Testing**: Unit tests for emulation, integration tests for plugins; Cross-platform builds with CI (GitHub Actions).
+6. **Release**: Open-source on GitHub, binaries for Windows/Linux.
+
+### Potential Challenges and Solutions
+- **Cross-Platform**: Differences in APIs (e.g., Bluetooth) – solve via abstraction layer (e.g., rust-bluetooth crate).
+- **Performance**: GPU on Windows – use wgpu for unified rendering.
+- **Security for Plugins**: WASM sandboxing prevents abuse; user confirm for sensitive accesses.
+- **Blockchain Integration**: Midnight is privacy-focused with ZK-SNARKs; ensure secure wallet handling without exposing keys.
+- **Community**: Encourage plugin development through docs and a repo for contributions.
+
+This planning provides a solid base – if needed, I can dive deeper into any specific aspect!
