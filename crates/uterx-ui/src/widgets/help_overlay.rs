@@ -112,13 +112,13 @@ impl HelpOverlay {
 
 impl Widget for HelpOverlay {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let bg = Color::Rgb(24, 24, 37);          // Catppuccin mantle
+        let bg = Color::Rgb(24, 24, 37); // Catppuccin mantle
         let border_color = Color::Rgb(137, 180, 250); // Catppuccin blue
-        let title_color = Color::Rgb(203, 166, 247);  // Catppuccin mauve
-        let heading = Color::Rgb(249, 226, 175);  // Catppuccin yellow
+        let title_color = Color::Rgb(203, 166, 247); // Catppuccin mauve
+        let heading = Color::Rgb(249, 226, 175); // Catppuccin yellow
         let key_color = Color::Rgb(166, 227, 161); // Catppuccin green
         let text_color = Color::Rgb(205, 214, 244); // Catppuccin text
-        let dim = Color::Rgb(88, 91, 112);         // Catppuccin overlay0
+        let dim = Color::Rgb(88, 91, 112); // Catppuccin overlay0
 
         // Fill background with semi-transparent feel
         let bg_style = Style::default().bg(bg);
@@ -251,12 +251,7 @@ impl Widget for HelpOverlay {
                     // Key + description
                     let key_padded = format!("    {:<18}", key);
                     buf.set_string(inner_x, cy, &key_padded, key_style);
-                    buf.set_string(
-                        inner_x + key_padded.len() as u16,
-                        cy,
-                        desc,
-                        text_style,
-                    );
+                    buf.set_string(inner_x + key_padded.len() as u16, cy, desc, text_style);
                 }
                 cy += 1;
             }

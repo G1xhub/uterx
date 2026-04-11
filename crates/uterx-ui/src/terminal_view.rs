@@ -3,15 +3,28 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     widgets::Widget,
 };
 use uterx_core::Grid;
+use uterx_mux::pane::Selection;
+
+/// A search match position.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchMatch {
+    pub row: usize,
+    pub col: usize,
+    pub len: usize,
+}
 
 /// A ratatui widget that renders a terminal grid.
 pub struct TerminalView<'a> {
     grid: &'a Grid,
     show_cursor: bool,
+    scrollback_offset: usize,
+    selection: Option<&'a Selection>,
+    search_matches: &'a [SearchMatch],
+    current_match: usize,
 }
 
 impl<'a> TerminalView<'a> {
@@ -19,11 +32,34 @@ impl<'a> TerminalView<'a> {
         Self {
             grid,
             show_cursor: true,
+            scrollback_offset: 0,
+            selection: None,
+            search_matches: &[],
+            current_match: 0,
         }
     }
 
     pub fn show_cursor(mut self, show: bool) -> Self {
         self.show_cursor = show;
+        self
+    }
+
+    /// Set scrollback offset — how many lines to scroll up from the current screen.
+    pub fn scrollback_offset(mut self, offset: usize) -> Self {
+        self.scrollback_offset = offset;
+        self
+    }
+
+    /// Set text selection to highlight.
+    pub fn selection(mut self, sel: Option<&'a Selection>) -> Self {
+        self.selection = sel;
+        self
+    }
+
+    /// Set search matches to highlight.
+    pub fn search_matches(mut self, matches: &'a [SearchMatch], current: usize) -> Self {
+        self.search_matches = matches;
+        self.current_match = current;
         self
     }
 }
@@ -32,12 +68,63 @@ impl<'a> Widget for TerminalView<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let rows = (area.height as usize).min(self.grid.rows());
         let cols = (area.width as usize).min(self.grid.cols());
+        let scrollback = &self.grid.scrollback;
+        let scrollback_len = scrollback.len();
 
         for row in 0..rows {
             for col in 0..cols {
-                if let Some(cell) = self.grid.cell(row, col) {
+                let cell_opt = if self.scrollback_offset > 0 {
+                    // Showing scrollback history
+                    let scrollback_row =
+                        scrollback_len.saturating_sub(self.scrollback_offset) + row;
+                    if scrollback_row < scrollback_len {
+                        // Get cell from scrollback
+                        scrollback
+                            .line(scrollback_row)
+                            .and_then(|line| line.get(col))
+                    } else {
+                        // We've scrolled past scrollback, show current grid
+                        let grid_row = scrollback_row - scrollback_len;
+                        self.grid.cell(grid_row, col)
+                    }
+                } else {
+                    // Normal rendering - current screen only
+                    self.grid.cell(row, col)
+                };
+
+                if let Some(cell) = cell_opt {
                     let ch = cell.content.chars().next().unwrap_or(' ');
-                    let style = convert_style(&cell.attrs);
+                    let mut style = convert_style(&cell.attrs);
+
+                    // Check if this cell is selected
+                    if let Some(sel) = self.selection {
+                        // For current screen (no scrollback), use row directly
+                        // For scrollback, we'd need to map differently
+                        if self.scrollback_offset == 0 && sel.contains(row, col) {
+                            // Invert colors for selection
+                            style = Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Rgb(137, 180, 250)) // Catppuccin blue
+                                .add_modifier(Modifier::BOLD);
+                        }
+                    }
+
+                    // Check if this cell is part of a search match
+                    if self.scrollback_offset == 0 {
+                        for (i, m) in self.search_matches.iter().enumerate() {
+                            if m.row == row && col >= m.col && col < m.col + m.len {
+                                if i == self.current_match {
+                                    // Current match - bright yellow background
+                                    style = style.bg(Color::Rgb(249, 226, 175));
+                                // Catppuccin yellow
+                                } else {
+                                    // Other matches - subtle yellow background
+                                    style = style.bg(Color::Rgb(69, 71, 90)); // Darker highlight
+                                }
+                                break;
+                            }
+                        }
+                    }
 
                     let x = area.x + col as u16;
                     let y = area.y + row as u16;
@@ -49,8 +136,8 @@ impl<'a> Widget for TerminalView<'a> {
             }
         }
 
-        // Draw cursor
-        if self.show_cursor {
+        // Draw cursor (only if not scrolling through history)
+        if self.show_cursor && self.scrollback_offset == 0 {
             let cx = area.x + self.grid.cursor_col as u16;
             let cy = area.y + self.grid.cursor_row as u16;
             if cx < area.x + area.width && cy < area.y + area.height {

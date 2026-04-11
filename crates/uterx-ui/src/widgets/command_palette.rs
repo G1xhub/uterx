@@ -32,19 +32,40 @@ pub fn default_commands() -> Vec<CommandEntry> {
         CommandEntry::new("New Tab", "Ctrl+T", "Open a new terminal tab"),
         CommandEntry::new("Close Tab", "Ctrl+W", "Close the active tab"),
         CommandEntry::new("Next Tab", "Ctrl+Tab", "Switch to the next tab"),
-        CommandEntry::new("Previous Tab", "Ctrl+Shift+Tab", "Switch to the previous tab"),
+        CommandEntry::new(
+            "Previous Tab",
+            "Ctrl+Shift+Tab",
+            "Switch to the previous tab",
+        ),
         CommandEntry::new("Split Vertical", "Alt+V", "Split pane left/right"),
         CommandEntry::new("Split Horizontal", "Alt+H", "Split pane top/bottom"),
         CommandEntry::new("Focus Next Pane", "Alt+Right", "Move focus to next pane"),
-        CommandEntry::new("Focus Previous Pane", "Alt+Left", "Move focus to previous pane"),
-        CommandEntry::new("Toggle Broadcast", "Alt+B", "Type in all panes simultaneously"),
+        CommandEntry::new(
+            "Focus Previous Pane",
+            "Alt+Left",
+            "Move focus to previous pane",
+        ),
+        CommandEntry::new(
+            "Toggle Broadcast",
+            "Alt+B",
+            "Type in all panes simultaneously",
+        ),
         CommandEntry::new("Toggle Floating", "Alt+F", "Float/unfloat focused pane"),
+        CommandEntry::new("Toggle Maximize", "Alt+M", "Maximize/restore focused pane"),
         // ── Sidebars ─────────────────────────────────────────────────────
         CommandEntry::new("File Browser", "Ctrl+E", "Toggle file explorer sidebar"),
-        CommandEntry::new("Search Files", "/", "Search files in explorer (open sidebar first)"),
+        CommandEntry::new(
+            "Search Files",
+            "/",
+            "Search files in explorer (open sidebar first)",
+        ),
         CommandEntry::new("AI Sidebar", "Alt+A", "Configure AI providers and API keys"),
         // ── AI ────────────────────────────────────────────────────────────
-        CommandEntry::new("New AI Chat", "Alt+I", "Launch AI chat in a new terminal pane"),
+        CommandEntry::new(
+            "New AI Chat",
+            "Alt+I",
+            "Launch AI chat in a new terminal pane",
+        ),
         // ── App ───────────────────────────────────────────────────────────
         CommandEntry::new("Help", "F1", "Show help & keybindings"),
         CommandEntry::new("Command Palette", "Ctrl+P", "Open this command palette"),
@@ -71,14 +92,14 @@ impl<'a> CommandPalette<'a> {
 
 impl<'a> Widget for CommandPalette<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let bg = Color::Rgb(30, 30, 46);         // Catppuccin base
-        let surface = Color::Rgb(49, 50, 68);    // Catppuccin surface0
+        let bg = Color::Rgb(30, 30, 46); // Catppuccin base
+        let surface = Color::Rgb(49, 50, 68); // Catppuccin surface0
         let border_color = Color::Rgb(137, 180, 250); // Catppuccin blue
-        let text = Color::Rgb(205, 214, 244);    // Catppuccin text
+        let text = Color::Rgb(205, 214, 244); // Catppuccin text
         let subtext = Color::Rgb(166, 173, 200); // Catppuccin subtext0
-        let green = Color::Rgb(166, 227, 161);   // Catppuccin green
-        let dim = Color::Rgb(88, 91, 112);       // Catppuccin overlay0
-        let sel_bg = Color::Rgb(69, 71, 90);     // Catppuccin surface1
+        let green = Color::Rgb(166, 227, 161); // Catppuccin green
+        let dim = Color::Rgb(88, 91, 112); // Catppuccin overlay0
+        let sel_bg = Color::Rgb(69, 71, 90); // Catppuccin surface1
 
         // Center the palette
         let palette_w = 60u16.min(area.width.saturating_sub(4));
@@ -155,11 +176,7 @@ impl<'a> Widget for CommandPalette<'a> {
         if input_y < area.y + area.height {
             let input_style = Style::default().fg(text).bg(surface);
             let prompt = format!(" > {}", self.filter);
-            let padded = format!(
-                "{:<width$}",
-                prompt,
-                width = (palette_w - 2) as usize
-            );
+            let padded = format!("{:<width$}", prompt, width = (palette_w - 2) as usize);
             buf.set_string(px + 1, input_y, &padded, input_style);
         }
 
@@ -187,9 +204,12 @@ impl<'a> Widget for CommandPalette<'a> {
             let label_style = Style::default()
                 .fg(if is_selected { text } else { subtext })
                 .bg(row_bg)
-                .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() });
+                .add_modifier(if is_selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
             let shortcut_style = Style::default().fg(green).bg(row_bg);
-            let _desc_style = Style::default().fg(dim).bg(row_bg);
 
             // Clear row
             let clear = " ".repeat(inner_w);
@@ -211,6 +231,34 @@ impl<'a> Widget for CommandPalette<'a> {
             let sc_x = px + palette_w - 2 - sc_len;
             if sc_x > px + 4 + cmd.label.len() as u16 {
                 buf.set_string(sc_x, cy, &cmd.shortcut, shortcut_style);
+            }
+        }
+
+        // ── Description for selected command ──────────────────────────────
+        if let Some(selected_cmd) = self.commands.get(self.selected) {
+            let desc_y = bot.saturating_sub(2);
+            if desc_y > list_start_y && desc_y < area.y + area.height {
+                // Separator before description
+                if desc_y > list_start_y + 1 {
+                    let sep_y = desc_y.saturating_sub(1);
+                    buf.set_string(px, sep_y, "\u{251c}", border_style);
+                    for x in (px + 1)..(px + palette_w - 1) {
+                        buf.set_string(x, sep_y, "\u{2500}", border_style);
+                    }
+                    buf.set_string(px + palette_w - 1, sep_y, "\u{2524}", border_style);
+                }
+
+                // Description text
+                let desc_style = Style::default().fg(dim).bg(bg);
+                let desc_text = format!(" {} ", selected_cmd.description);
+                let max_desc_w = (palette_w - 2) as usize;
+                let truncated = if desc_text.len() > max_desc_w {
+                    &desc_text[..max_desc_w]
+                } else {
+                    &desc_text
+                };
+                let padded = format!("{:<width$}", truncated, width = max_desc_w);
+                buf.set_string(px + 1, desc_y, &padded, desc_style);
             }
         }
     }

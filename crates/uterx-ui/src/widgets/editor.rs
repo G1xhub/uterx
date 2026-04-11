@@ -144,16 +144,12 @@ impl EditorState {
     }
 
     fn rebuild_highlight_cache(&mut self) {
-        self.syntax_cache = highlight_all_lines(&self.lines, &self.extension, &self.ss, &self.theme);
+        self.syntax_cache =
+            highlight_all_lines(&self.lines, &self.extension, &self.ss, &self.theme);
     }
 
     fn invalidate_line_cache(&mut self, row: usize) {
-        let highlighted = highlight_line(
-            &self.lines[row],
-            &self.extension,
-            &self.ss,
-            &self.theme,
-        );
+        let highlighted = highlight_line(&self.lines[row], &self.extension, &self.ss, &self.theme);
         if row < self.syntax_cache.len() {
             self.syntax_cache[row] = highlighted;
         } else {
@@ -258,8 +254,7 @@ impl EditorState {
 
     /// Move cursor: h/j/k/l.
     pub fn move_cursor(&mut self, dr: i32, dc: i32) {
-        let new_row = (self.cursor_row as i32 + dr)
-            .clamp(0, self.lines.len() as i32 - 1) as usize;
+        let new_row = (self.cursor_row as i32 + dr).clamp(0, self.lines.len() as i32 - 1) as usize;
         self.cursor_row = new_row;
         let line_len = self.lines[self.cursor_row].len();
         let new_col = (self.cursor_col as i32 + dc).clamp(0, line_len as i32) as usize;
@@ -289,7 +284,11 @@ impl EditorState {
 
     /// Adjust scroll so cursor stays within the visible window.
     pub fn adjust_scroll_to_cursor(&mut self, visible_height: usize) {
-        let vh = if visible_height < 3 { 20 } else { visible_height };
+        let vh = if visible_height < 3 {
+            20
+        } else {
+            visible_height
+        };
         if self.cursor_row < self.scroll_offset {
             self.scroll_offset = self.cursor_row;
         }
@@ -340,12 +339,7 @@ impl EditorState {
 
 // ── Syntax highlighting helpers ───────────────────────────────────────────────
 
-fn highlight_line(
-    line: &str,
-    extension: &str,
-    ss: &SyntaxSet,
-    theme: &Theme,
-) -> HighlightedLine {
+fn highlight_line(line: &str, extension: &str, ss: &SyntaxSet, theme: &Theme) -> HighlightedLine {
     let syntax = ss
         .find_syntax_by_extension(extension)
         .unwrap_or_else(|| ss.find_syntax_plain_text());
@@ -380,11 +374,7 @@ fn highlight_all_lines(
         let colored: HighlightedLine = spans
             .into_iter()
             .map(|(style, text)| {
-                let fg = Color::Rgb(
-                    style.foreground.r,
-                    style.foreground.g,
-                    style.foreground.b,
-                );
+                let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
                 (fg, text.trim_end_matches(&['\n', '\r']).to_string())
             })
             .filter(|(_, t)| !t.is_empty())
@@ -573,20 +563,23 @@ impl<'a> Widget for EditorWidget<'a> {
         let file_str = format!("  {}{}", fname, mod_indicator);
 
         let file_style = if state.modified {
-            Style::default().fg(C_PEACH).bg(C_SURFACE0).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(C_PEACH)
+                .bg(C_SURFACE0)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(C_TEXT).bg(C_SURFACE0)
         };
 
-        let right_str = format!(
-            "Ln {} Col {} ",
-            state.cursor_row + 1,
-            state.cursor_col + 1
-        );
+        let right_str = format!("Ln {} Col {} ", state.cursor_row + 1, state.cursor_col + 1);
         let right_x = (area.x + area.width).saturating_sub(right_str.len() as u16);
 
         // Fill status bar background
-        let status_mid = format!("{:<width$}", file_str, width = right_x.saturating_sub(sx) as usize);
+        let status_mid = format!(
+            "{:<width$}",
+            file_str,
+            width = right_x.saturating_sub(sx) as usize
+        );
         buf.set_string(sx, status_y, &status_mid, file_style);
         sx += status_mid.len() as u16;
 

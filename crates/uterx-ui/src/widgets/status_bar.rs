@@ -15,19 +15,24 @@ pub struct StatusBar<'a> {
     pub tab_count: usize,
     pub broadcast: bool,
     pub focused_index: usize,
+    /// Optional transient notification to render in the status area (right-aligned).
+    pub notification: Option<&'a str>,
 }
 
 impl<'a> Widget for StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let bg = Color::Rgb(30, 30, 46);       // Catppuccin base
-        let fg = Color::Rgb(166, 173, 200);     // Catppuccin subtext0
+        let bg = Color::Rgb(30, 30, 46); // Catppuccin base
+        let fg = Color::Rgb(166, 173, 200); // Catppuccin subtext0
         let accent = Color::Rgb(137, 180, 250); // Catppuccin blue
-        let green = Color::Rgb(166, 227, 161);  // Catppuccin green
+        let green = Color::Rgb(166, 227, 161); // Catppuccin green
         let yellow = Color::Rgb(249, 226, 175); // Catppuccin yellow
-        let dim = Color::Rgb(88, 91, 112);      // Catppuccin overlay0
+        let dim = Color::Rgb(88, 91, 112); // Catppuccin overlay0
 
         let base_style = Style::default().fg(fg).bg(bg);
-        let accent_style = Style::default().fg(accent).bg(bg).add_modifier(Modifier::BOLD);
+        let accent_style = Style::default()
+            .fg(accent)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD);
         let sep_style = Style::default().fg(dim).bg(bg);
         let hint_style = Style::default().fg(dim).bg(bg);
         let hint_key_style = Style::default().fg(green).bg(bg);
@@ -65,11 +70,7 @@ impl<'a> Widget for StatusBar<'a> {
         x += 3;
 
         // Pane count info
-        let pane_info = format!(
-            "{}/{} panes",
-            self.focused_index + 1,
-            self.pane_count
-        );
+        let pane_info = format!("{}/{} panes", self.focused_index + 1, self.pane_count);
         buf.set_string(x, area.y, &pane_info, base_style);
         x += pane_info.len() as u16;
 

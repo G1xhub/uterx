@@ -20,6 +20,8 @@ pub enum AiProvider {
     OpenAi = 1,
     Ollama = 2,
     Custom = 3,
+    ZAi = 4,
+    Kimi = 5,
 }
 
 impl AiProvider {
@@ -28,32 +30,40 @@ impl AiProvider {
         AiProvider::OpenAi,
         AiProvider::Ollama,
         AiProvider::Custom,
+        AiProvider::ZAi,
+        AiProvider::Kimi,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Anthropic => "Anthropic",
-            Self::OpenAi    => "OpenAI",
-            Self::Ollama    => "Ollama",
-            Self::Custom    => "Custom",
+            Self::OpenAi => "OpenAI",
+            Self::Ollama => "Ollama",
+            Self::Custom => "Custom",
+            Self::ZAi => "z.Ai",
+            Self::Kimi => "Kimi",
         }
     }
 
     pub fn default_model(self) -> &'static str {
         match self {
             Self::Anthropic => "claude-opus-4-6",
-            Self::OpenAi    => "gpt-4o",
-            Self::Ollama    => "llama3.2",
-            Self::Custom    => "",
+            Self::OpenAi => "gpt-4o",
+            Self::Ollama => "llama3.2",
+            Self::Custom => "",
+            Self::ZAi => "zai-default",
+            Self::Kimi => "kimi-k2",
         }
     }
 
     pub fn env_var(self) -> &'static str {
         match self {
             Self::Anthropic => "ANTHROPIC_API_KEY",
-            Self::OpenAi    => "OPENAI_API_KEY",
-            Self::Ollama    => "OPENAI_API_KEY",
-            Self::Custom    => "OPENAI_API_KEY",
+            Self::OpenAi => "OPENAI_API_KEY",
+            Self::Ollama => "OPENAI_API_KEY",
+            Self::Custom => "OPENAI_API_KEY",
+            Self::ZAi => "ZAI_API_KEY",
+            Self::Kimi => "KIMI_API_KEY",
         }
     }
 
@@ -63,6 +73,8 @@ impl AiProvider {
             1 => Self::OpenAi,
             2 => Self::Ollama,
             3 => Self::Custom,
+            4 => Self::ZAi,
+            5 => Self::Kimi,
             _ => Self::Anthropic,
         }
     }
@@ -73,7 +85,7 @@ impl AiProvider {
 
     /// Whether this provider needs a Base URL field.
     pub fn needs_base_url(self) -> bool {
-        matches!(self, Self::Ollama | Self::Custom)
+        matches!(self, Self::Ollama | Self::Custom | Self::ZAi | Self::Kimi)
     }
 
     /// Whether this provider typically needs an API key.
@@ -92,7 +104,13 @@ pub enum AiSidebarField {
     ApiKey,
     Model,
     BaseUrl,
+    /// Save current config to disk (this will also attempt keyring storage if available)
     SaveButton,
+    /// Toggle whether to persist API key to OS keyring (checkbox)
+    SaveToKeyring,
+    /// Test the configured provider + key by attempting a lightweight connection
+    TestConnection,
+    /// Start an interactive AI chat (launches the configured CLI)
     StartChatButton,
 }
 
@@ -118,6 +136,10 @@ pub struct AiSidebarState {
     pub dirty: bool,
     /// One-shot status message shown after save / error.
     pub status_msg: Option<String>,
+    /// Transient test result for the Test Connection action.
+    pub test_status: Option<String>,
+    /// Whether the UI checkbox to save key to OS keyring is checked.
+    pub save_to_keyring: bool,
     /// Set to true when the user confirms "Start Chat" — event loop acts on it.
     pub start_chat_requested: bool,
 }
@@ -140,6 +162,8 @@ impl AiSidebarState {
             focused_field: AiSidebarField::ApiKey,
             dirty: false,
             status_msg: None,
+            test_status: None,
+            save_to_keyring: true, // sensible default: encourage secure storage
             start_chat_requested: false,
         }
     }
@@ -160,8 +184,8 @@ impl AiSidebarState {
     /// Mutable reference to the text of the currently focused field, if it is a text input.
     pub fn focused_text_mut(&mut self) -> Option<&mut String> {
         match &self.focused_field {
-            AiSidebarField::ApiKey  => Some(&mut self.api_key),
-            AiSidebarField::Model   => Some(&mut self.model),
+            AiSidebarField::ApiKey => Some(&mut self.api_key),
+            AiSidebarField::Model => Some(&mut self.model),
             AiSidebarField::BaseUrl => Some(&mut self.base_url),
             _ => None,
         }
@@ -170,17 +194,19 @@ impl AiSidebarState {
     /// Move focus forward (Tab / Down).
     pub fn focus_next(&mut self) {
         self.focused_field = match &self.focused_field {
-            AiSidebarField::Provider(_)    => AiSidebarField::ApiKey,
-            AiSidebarField::ApiKey         => AiSidebarField::Model,
-            AiSidebarField::Model          => {
+            AiSidebarField::Provider(_) => AiSidebarField::ApiKey,
+            AiSidebarField::ApiKey => AiSidebarField::Model,
+            AiSidebarField::Model => {
                 if self.provider.needs_base_url() {
                     AiSidebarField::BaseUrl
                 } else {
                     AiSidebarField::SaveButton
                 }
             }
-            AiSidebarField::BaseUrl        => AiSidebarField::SaveButton,
-            AiSidebarField::SaveButton     => AiSidebarField::StartChatButton,
+            AiSidebarField::BaseUrl => AiSidebarField::SaveButton,
+            AiSidebarField::SaveButton => AiSidebarField::SaveToKeyring,
+            AiSidebarField::SaveToKeyring => AiSidebarField::TestConnection,
+            AiSidebarField::TestConnection => AiSidebarField::StartChatButton,
             AiSidebarField::StartChatButton => AiSidebarField::ApiKey,
         };
     }
@@ -189,25 +215,31 @@ impl AiSidebarState {
     pub fn focus_prev(&mut self) {
         let pi = self.provider.index();
         self.focused_field = match &self.focused_field {
-            AiSidebarField::Provider(_)    => AiSidebarField::StartChatButton,
-            AiSidebarField::ApiKey         => AiSidebarField::Provider(pi),
-            AiSidebarField::Model          => AiSidebarField::ApiKey,
-            AiSidebarField::BaseUrl        => AiSidebarField::Model,
-            AiSidebarField::SaveButton     => {
+            AiSidebarField::Provider(_) => AiSidebarField::StartChatButton,
+            AiSidebarField::ApiKey => AiSidebarField::Provider(pi),
+            AiSidebarField::Model => AiSidebarField::ApiKey,
+            AiSidebarField::BaseUrl => AiSidebarField::Model,
+            AiSidebarField::SaveButton => {
                 if self.provider.needs_base_url() {
                     AiSidebarField::BaseUrl
                 } else {
                     AiSidebarField::Model
                 }
             }
-            AiSidebarField::StartChatButton => AiSidebarField::SaveButton,
+            AiSidebarField::SaveToKeyring => AiSidebarField::SaveButton,
+            AiSidebarField::TestConnection => AiSidebarField::SaveToKeyring,
+            AiSidebarField::StartChatButton => AiSidebarField::TestConnection,
         };
     }
 
     /// Cycle provider selection left / right using arrow keys when a provider tab is focused.
     pub fn provider_left(&mut self) {
         let i = self.provider.index();
-        let new = if i == 0 { AiProvider::ALL.len() - 1 } else { i - 1 };
+        let new = if i == 0 {
+            AiProvider::ALL.len() - 1
+        } else {
+            i - 1
+        };
         self.provider = AiProvider::from_index(new);
         self.focused_field = AiSidebarField::Provider(new);
         self.dirty = true;
@@ -238,6 +270,7 @@ impl AiSidebarState {
 
     /// Build the shell command to launch an AI chat session.
     /// Returns a shell command string (e.g. `export ANTHROPIC_API_KEY='...'; opencode`).
+    /// Build environment variable exports for the chat command.
     pub fn build_chat_command(&self) -> String {
         let model = if self.model.is_empty() {
             self.provider.default_model().to_string()
@@ -245,15 +278,29 @@ impl AiSidebarState {
             self.model.clone()
         };
 
-        // Escape single quotes in the key to prevent shell injection
-        let safe_key = self.api_key.replace('\'', "'\\''");
+        if cfg!(target_os = "windows") {
+            self.build_chat_command_windows(&model)
+        } else {
+            self.build_chat_command_unix(&model)
+        }
+    }
 
-        let mut env_exports = match self.provider {
+    fn build_chat_command_windows(&self, model: &str) -> String {
+        // Escape single quotes for PowerShell
+        let safe_key = self.api_key.replace('\'', "''");
+
+        let env_exports = match self.provider {
             AiProvider::Anthropic => {
-                format!("export ANTHROPIC_API_KEY='{}'; export ANTHROPIC_MODEL='{}'", safe_key, model)
+                format!(
+                    "$env:ANTHROPIC_API_KEY='{}'; $env:ANTHROPIC_MODEL='{}'",
+                    safe_key, model
+                )
             }
             AiProvider::OpenAi => {
-                format!("export OPENAI_API_KEY='{}'; export OPENAI_MODEL='{}'", safe_key, model)
+                format!(
+                    "$env:OPENAI_API_KEY='{}'; $env:OPENAI_MODEL='{}'",
+                    safe_key, model
+                )
             }
             AiProvider::Ollama => {
                 let base = if self.base_url.is_empty() {
@@ -261,7 +308,91 @@ impl AiSidebarState {
                 } else {
                     self.base_url.clone()
                 };
-                format!("export OLLAMA_HOST='{}'; export OPENAI_BASE_URL='{}/v1'; export OPENAI_MODEL='{}'", base, base, model)
+                format!(
+                    "$env:OLLAMA_HOST='{}'; $env:OPENAI_BASE_URL='{}/v1'; $env:OPENAI_MODEL='{}'",
+                    base, base, model
+                )
+            }
+            AiProvider::Custom => {
+                format!(
+                    "$env:OPENAI_API_KEY='{}'; $env:OPENAI_BASE_URL='{}'; $env:OPENAI_MODEL='{}'",
+                    safe_key, self.base_url, model
+                )
+            }
+            AiProvider::ZAi => {
+                let base = if self.base_url.is_empty() {
+                    "https://api.z.ai".to_string()
+                } else {
+                    self.base_url.clone()
+                };
+                format!(
+                    "$env:ZAI_API_KEY='{}'; $env:OPENAI_BASE_URL='{}/v1'; $env:OPENAI_MODEL='{}'",
+                    safe_key, base, model
+                )
+            }
+            AiProvider::Kimi => {
+                let base = if self.base_url.is_empty() {
+                    "https://api.moonshot.cn".to_string()
+                } else {
+                    self.base_url.clone()
+                };
+                format!(
+                    "$env:KIMI_API_KEY='{}'; $env:OPENAI_BASE_URL='{}/v1'; $env:OPENAI_MODEL='{}'",
+                    safe_key, base, model
+                )
+            }
+        };
+
+        let launcher = match self.provider {
+            AiProvider::Ollama => {
+                format!(
+                    "if (Get-Command opencode -ErrorAction SilentlyContinue) {{ opencode }} \
+                     elseif (Get-Command aichat -ErrorAction SilentlyContinue) {{ aichat }} \
+                     elseif (Get-Command ollama -ErrorAction SilentlyContinue) {{ ollama run '{}' }} \
+                     else {{ Write-Host 'Install opencode, aichat, or ollama for AI chat' }}",
+                    model
+                )
+            }
+            _ => {
+                "if (Get-Command opencode -ErrorAction SilentlyContinue) { opencode } \
+                 elseif (Get-Command aichat -ErrorAction SilentlyContinue) { aichat } \
+                 elseif (Get-Command llm -ErrorAction SilentlyContinue) { llm chat } \
+                 elseif (Get-Command sgpt -ErrorAction SilentlyContinue) { sgpt --chat } \
+                 else { Write-Host 'Install opencode or aichat for AI chat (https://opencode.ai)' }"
+                    .to_string()
+            }
+        };
+
+        format!("{}; {}", env_exports, launcher)
+    }
+
+    fn build_chat_command_unix(&self, model: &str) -> String {
+        // Escape single quotes in the key to prevent shell injection
+        let safe_key = self.api_key.replace('\'', "'\\''");
+
+        let env_exports = match self.provider {
+            AiProvider::Anthropic => {
+                format!(
+                    "export ANTHROPIC_API_KEY='{}'; export ANTHROPIC_MODEL='{}'",
+                    safe_key, model
+                )
+            }
+            AiProvider::OpenAi => {
+                format!(
+                    "export OPENAI_API_KEY='{}'; export OPENAI_MODEL='{}'",
+                    safe_key, model
+                )
+            }
+            AiProvider::Ollama => {
+                let base = if self.base_url.is_empty() {
+                    "http://localhost:11434".to_string()
+                } else {
+                    self.base_url.clone()
+                };
+                format!(
+                    "export OLLAMA_HOST='{}'; export OPENAI_BASE_URL='{}/v1'; export OPENAI_MODEL='{}'",
+                    base, base, model
+                )
             }
             AiProvider::Custom => {
                 format!(
@@ -269,27 +400,46 @@ impl AiSidebarState {
                     safe_key, self.base_url, model
                 )
             }
+            AiProvider::ZAi => {
+                let base = if self.base_url.is_empty() {
+                    "https://api.z.ai".to_string()
+                } else {
+                    self.base_url.clone()
+                };
+                format!(
+                    "export ZAI_API_KEY='{}'; export OPENAI_BASE_URL='{}/v1'; export OPENAI_MODEL='{}'",
+                    safe_key, base, model
+                )
+            }
+            AiProvider::Kimi => {
+                let base = if self.base_url.is_empty() {
+                    "https://api.moonshot.cn".to_string()
+                } else {
+                    self.base_url.clone()
+                };
+                format!(
+                    "export KIMI_API_KEY='{}'; export OPENAI_BASE_URL='{}/v1'; export OPENAI_MODEL='{}'",
+                    safe_key, base, model
+                )
+            }
         };
 
-        // Try to detect available AI CLI tools and launch the best one.
-        // Priority: opencode > aichat > llm > sgpt > ollama (for Ollama provider)
         let launcher = match self.provider {
             AiProvider::Ollama => {
                 format!(
-                    "command -v opencode >/dev/null 2>&1 && opencode \
-                     || command -v aichat >/dev/null 2>&1 && aichat \
-                     || command -v ollama >/dev/null 2>&1 && ollama run '{}' \
-                     || echo 'Install opencode, aichat, or ollama for AI chat'",
+                    "command -v opencode > /dev/null 2>&1 && opencode || \
+                     command -v aichat > /dev/null 2>&1 && aichat || \
+                     command -v ollama > /dev/null 2>&1 && ollama run '{}' || \
+                     echo 'Install opencode, aichat, or ollama for AI chat'",
                     model
                 )
             }
-            _ => {
-                "command -v opencode >/dev/null 2>&1 && opencode \
-                 || command -v aichat >/dev/null 2>&1 && aichat \
-                 || command -v llm >/dev/null 2>&1 && llm chat \
-                 || command -v sgpt >/dev/null 2>&1 && sgpt --chat \
-                 || echo 'Install opencode or aichat for AI chat (https://opencode.ai)'".to_string()
-            }
+            _ => "command -v opencode > /dev/null 2>&1 && opencode || \
+                 command -v aichat > /dev/null 2>&1 && aichat || \
+                 command -v llm > /dev/null 2>&1 && llm chat || \
+                 command -v sgpt > /dev/null 2>&1 && sgpt --chat || \
+                 echo 'Install opencode or aichat for AI chat (https://opencode.ai)'"
+                .to_string(),
         };
 
         format!("{}; {}", env_exports, launcher)
@@ -313,17 +463,17 @@ impl<'a> AiSidebarWidget<'a> {
 impl<'a> Widget for AiSidebarWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // ── Catppuccin Mocha palette ──────────────────────────────────────
-        let bg       = Color::Rgb(30,  30,  46);   // base
-        let surface  = Color::Rgb(49,  50,  68);   // surface0
-        let surface1 = Color::Rgb(69,  71,  90);   // surface1
-        let border   = Color::Rgb(203, 166, 247);  // mauve  (distinct from blue used by file browser)
-        let text_col = Color::Rgb(205, 214, 244);  // text
-        let subtext  = Color::Rgb(166, 173, 200);  // subtext0
-        let green    = Color::Rgb(166, 227, 161);  // green
-        let yellow   = Color::Rgb(249, 226, 175);  // yellow
-        let peach    = Color::Rgb(250, 179, 135);  // peach
-        let dim      = Color::Rgb(88,  91,  112);  // overlay0
-        let sky      = Color::Rgb(137, 220, 235);  // sky
+        let bg = Color::Rgb(30, 30, 46); // base
+        let surface = Color::Rgb(49, 50, 68); // surface0
+        let surface1 = Color::Rgb(69, 71, 90); // surface1
+        let border = Color::Rgb(203, 166, 247); // mauve  (distinct from blue used by file browser)
+        let text_col = Color::Rgb(205, 214, 244); // text
+        let subtext = Color::Rgb(166, 173, 200); // subtext0
+        let green = Color::Rgb(166, 227, 161); // green
+        let yellow = Color::Rgb(249, 226, 175); // yellow
+        let peach = Color::Rgb(250, 179, 135); // peach
+        let dim = Color::Rgb(88, 91, 112); // overlay0
+        let sky = Color::Rgb(137, 220, 235); // sky
 
         // ── Fill background ───────────────────────────────────────────────
         let bg_style = Style::default().bg(bg);
@@ -371,7 +521,11 @@ impl<'a> Widget for AiSidebarWidget<'a> {
             let is_focused = self.focused
                 && matches!(&self.state.focused_field, AiSidebarField::Provider(j) if *j == prov.index());
 
-            let (fg, tab_bg) = if is_selected { (text_col, surface1) } else { (dim, bg) };
+            let (fg, tab_bg) = if is_selected {
+                (text_col, surface1)
+            } else {
+                (dim, bg)
+            };
             let mut style = Style::default().fg(fg).bg(tab_bg);
             if is_focused {
                 style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
@@ -403,7 +557,11 @@ impl<'a> Widget for AiSidebarWidget<'a> {
 
         {
             let is_foc = self.focused && self.state.focused_field == AiSidebarField::ApiKey;
-            let (ind, fg, field_bg) = if is_foc { ("▸ ", green, surface) } else { ("  ", dim, bg) };
+            let (ind, fg, field_bg) = if is_foc {
+                ("▸ ", green, surface)
+            } else {
+                ("  ", dim, bg)
+            };
             let masked = if self.state.api_key.is_empty() {
                 if !self.state.provider.needs_api_key() {
                     "(not required for Ollama)".to_string()
@@ -426,7 +584,9 @@ impl<'a> Widget for AiSidebarWidget<'a> {
             let content = format!("{}{}", ind, masked);
             let padded = format!("{:<width$}", content, width = inner_w);
             let s = Style::default().fg(fg).bg(field_bg);
-            buf.set_string(inner_x, y, &padded[..padded.len().min(inner_w)], s);
+            // Use char-based slicing to avoid breaking unicode characters
+            let visible_chars: String = padded.chars().take(inner_w as usize).collect();
+            buf.set_string(inner_x, y, &visible_chars, s);
         }
         y += 2;
 
@@ -436,7 +596,11 @@ impl<'a> Widget for AiSidebarWidget<'a> {
 
         {
             let is_foc = self.focused && self.state.focused_field == AiSidebarField::Model;
-            let (ind, fg, field_bg) = if is_foc { ("▸ ", green, surface) } else { ("  ", subtext, bg) };
+            let (ind, fg, field_bg) = if is_foc {
+                ("▸ ", green, surface)
+            } else {
+                ("  ", subtext, bg)
+            };
             let model_text = if self.state.model.is_empty() {
                 self.state.provider.default_model()
             } else {
@@ -445,7 +609,8 @@ impl<'a> Widget for AiSidebarWidget<'a> {
             let content = format!("{}{}", ind, model_text);
             let padded = format!("{:<width$}", content, width = inner_w);
             let s = Style::default().fg(fg).bg(field_bg);
-            buf.set_string(inner_x, y, &padded[..padded.len().min(inner_w)], s);
+            let visible_chars: String = padded.chars().take(inner_w as usize).collect();
+            buf.set_string(inner_x, y, &visible_chars, s);
         }
         y += 2;
 
@@ -455,10 +620,16 @@ impl<'a> Widget for AiSidebarWidget<'a> {
             y += 1;
 
             let is_foc = self.focused && self.state.focused_field == AiSidebarField::BaseUrl;
-            let (ind, fg, field_bg) = if is_foc { ("▸ ", green, surface) } else { ("  ", subtext, bg) };
+            let (ind, fg, field_bg) = if is_foc {
+                ("▸ ", green, surface)
+            } else {
+                ("  ", subtext, bg)
+            };
             let url_text = if self.state.base_url.is_empty() {
                 match self.state.provider {
                     AiProvider::Ollama => "http://localhost:11434",
+                    AiProvider::ZAi => "https://api.z.ai",
+                    AiProvider::Kimi => "https://api.moonshot.cn",
                     _ => "(not set)",
                 }
             } else {
@@ -467,7 +638,8 @@ impl<'a> Widget for AiSidebarWidget<'a> {
             let content = format!("{}{}", ind, url_text);
             let padded = format!("{:<width$}", content, width = inner_w);
             let s = Style::default().fg(fg).bg(field_bg);
-            buf.set_string(inner_x, y, &padded[..padded.len().min(inner_w)], s);
+            let visible_chars: String = padded.chars().take(inner_w as usize).collect();
+            buf.set_string(inner_x, y, &visible_chars, s);
             y += 2;
         }
 
@@ -488,14 +660,57 @@ impl<'a> Widget for AiSidebarWidget<'a> {
             } else {
                 Style::default().fg(green).bg(bg)
             };
-            let label = if self.state.dirty { "[ Save Config * ]" } else { "[ Save Config   ]" };
+            let label = if self.state.dirty {
+                "[ Save Config * ]"
+            } else {
+                "[ Save Config   ]"
+            };
             buf.set_string(inner_x, y, label, btn_style);
+        }
+        y += 1;
+
+        // ── Save-to-keyring checkbox ───────────────────────────────────────
+        {
+            let is_foc = self.focused && self.state.focused_field == AiSidebarField::SaveToKeyring;
+            let checked = self.state.save_to_keyring;
+            let cb_style = if is_foc {
+                Style::default()
+                    .fg(Color::Rgb(30, 30, 46))
+                    .bg(surface)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(subtext).bg(bg)
+            };
+            let label = if checked {
+                "[x] Save key to OS keyring "
+            } else {
+                "[ ] Save key to OS keyring "
+            };
+            let padded = format!("{:<width$}", label, width = inner_w);
+            let visible_chars: String = padded.chars().take(inner_w as usize).collect();
+            buf.set_string(inner_x, y, &visible_chars, cb_style);
+        }
+        y += 1;
+
+        // ── Test Connection button ────────────────────────────────────────
+        {
+            let is_foc = self.focused && self.state.focused_field == AiSidebarField::TestConnection;
+            let btn_style = if is_foc {
+                Style::default()
+                    .fg(Color::Rgb(30, 30, 46))
+                    .bg(Color::Rgb(137, 220, 235)) // sky as highlight
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Rgb(137, 220, 235)).bg(bg)
+            };
+            buf.set_string(inner_x, y, "[ Test Connection ]", btn_style);
         }
         y += 1;
 
         // ── Start Chat button ─────────────────────────────────────────────
         {
-            let is_foc = self.focused && self.state.focused_field == AiSidebarField::StartChatButton;
+            let is_foc =
+                self.focused && self.state.focused_field == AiSidebarField::StartChatButton;
             let btn_style = if is_foc {
                 Style::default()
                     .fg(Color::Rgb(30, 30, 46))
@@ -511,8 +726,8 @@ impl<'a> Widget for AiSidebarWidget<'a> {
         // ── Status message ────────────────────────────────────────────────
         if let Some(ref msg) = self.state.status_msg {
             let msg_style = Style::default().fg(sky).bg(bg);
-            let truncated = if msg.len() > inner_w { &msg[..inner_w] } else { msg };
-            buf.set_string(inner_x, y, truncated, msg_style);
+            let truncated: String = msg.chars().take(inner_w as usize).collect();
+            buf.set_string(inner_x, y, &truncated, msg_style);
             y += 1;
         }
 
@@ -521,8 +736,8 @@ impl<'a> Widget for AiSidebarWidget<'a> {
         if hint_y > y {
             let hint = "Tab/↑↓:nav  ←→:provider  Esc:close";
             let hint_style = Style::default().fg(dim).bg(bg);
-            let truncated = if hint.len() > inner_w { &hint[..inner_w] } else { hint };
-            buf.set_string(inner_x, hint_y, truncated, hint_style);
+            let truncated: String = hint.chars().take(inner_w as usize).collect();
+            buf.set_string(inner_x, hint_y, &truncated, hint_style);
         }
 
         // Suppress unused variable warning

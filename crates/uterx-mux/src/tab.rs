@@ -1,8 +1,8 @@
 //! Tab management — each tab contains one or more panes in a layout.
 
-use serde::{Deserialize, Serialize};
 use crate::layout::Layout;
 use crate::pane::{Pane, PaneId, Rect};
+use serde::{Deserialize, Serialize};
 
 /// Unique identifier for a tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -17,6 +17,9 @@ pub struct Tab {
     pub active_pane: Option<PaneId>,
     /// If true, keyboard input is broadcast to all panes.
     pub broadcast: bool,
+    /// If set, this pane is maximized and fills the entire terminal area.
+    /// Other panes are hidden while this pane is maximized.
+    pub maximized_pane: Option<PaneId>,
 }
 
 impl Tab {
@@ -28,6 +31,7 @@ impl Tab {
             layout: Layout::Single,
             active_pane: None,
             broadcast: false,
+            maximized_pane: None,
         }
     }
 
@@ -41,6 +45,7 @@ impl Tab {
             layout: Layout::Single,
             active_pane: Some(pane_id),
             broadcast: false,
+            maximized_pane: None,
         }
     }
 
@@ -58,9 +63,15 @@ impl Tab {
         self.panes.retain(|p| p.id != id);
         let removed = self.panes.len() < before;
 
-        if removed && self.active_pane == Some(id) {
-            // Focus the first remaining pane
-            self.active_pane = self.panes.first().map(|p| p.id);
+        if removed {
+            if self.active_pane == Some(id) {
+                // Focus the first remaining pane
+                self.active_pane = self.panes.first().map(|p| p.id);
+            }
+            // If the removed pane was maximized, clear the maximized state
+            if self.maximized_pane == Some(id) {
+                self.maximized_pane = None;
+            }
         }
         removed
     }
@@ -125,7 +136,8 @@ impl Tab {
         if self.panes.is_empty() {
             return;
         }
-        let current_idx = self.active_pane
+        let current_idx = self
+            .active_pane
             .and_then(|id| self.panes.iter().position(|p| p.id == id))
             .unwrap_or(0);
         let next_idx = (current_idx + 1) % self.panes.len();
@@ -143,7 +155,8 @@ impl Tab {
         if self.panes.is_empty() {
             return;
         }
-        let current_idx = self.active_pane
+        let current_idx = self
+            .active_pane
             .and_then(|id| self.panes.iter().position(|p| p.id == id))
             .unwrap_or(0);
         let prev_idx = if current_idx == 0 {
@@ -192,9 +205,13 @@ impl Tab {
         if self.broadcast {
             for pane in &mut self.panes {
                 pane.write_to_pty(data)?;
+                // Reset scrollback when user types
+                pane.scrollback_offset = 0;
             }
         } else if let Some(pane) = self.focused_pane_mut() {
             pane.write_to_pty(data)?;
+            // Reset scrollback when user types
+            pane.scrollback_offset = 0;
         }
         Ok(())
     }
@@ -221,7 +238,12 @@ impl Tab {
                 let fh = (area.height as f32 * 0.6) as u16;
                 let fx = area.x + (area.width.saturating_sub(fw)) / 2;
                 let fy = area.y + (area.height.saturating_sub(fh)) / 2;
-                let float_rect = Rect { x: fx, y: fy, width: fw, height: fh };
+                let float_rect = Rect {
+                    x: fx,
+                    y: fy,
+                    width: fw,
+                    height: fh,
+                };
                 pane.resize(float_rect);
             }
         }
@@ -241,10 +263,53 @@ impl Tab {
 
     /// Move a floating pane to an absolute position.
     pub fn move_floating_pane(&mut self, pane_id: PaneId, x: u16, y: u16) {
-        if let Some(pane) = self.panes.iter_mut().find(|p| p.id == pane_id && p.is_floating) {
+        if let Some(pane) = self
+            .panes
+            .iter_mut()
+            .find(|p| p.id == pane_id && p.is_floating)
+        {
             pane.rect.x = x;
             pane.rect.y = y;
         }
+    }
+
+    /// Toggle maximized state for the focused pane.
+    /// If the focused pane is already maximized, restore it.
+    /// If another pane is maximized, switch to the focused pane.
+    /// Returns true if a pane is now maximized, false otherwise.
+    pub fn toggle_maximize(&mut self) -> bool {
+        if let Some(focused_id) = self.active_pane {
+            // If currently maximized pane is the focused one, restore it
+            if self.maximized_pane == Some(focused_id) {
+                self.maximized_pane = None;
+                false
+            } else {
+                // Maximize the focused pane
+                self.maximized_pane = Some(focused_id);
+                true
+            }
+        } else {
+            // No focused pane, just clear any maximized state
+            self.maximized_pane = None;
+            false
+        }
+    }
+
+    /// Check if any pane is currently maximized.
+    pub fn has_maximized_pane(&self) -> bool {
+        self.maximized_pane.is_some()
+    }
+
+    /// Get the currently maximized pane if any.
+    pub fn maximized_pane(&self) -> Option<&Pane> {
+        self.maximized_pane
+            .and_then(|id| self.panes.iter().find(|p| p.id == id))
+    }
+
+    /// Get a mutable reference to the maximized pane if any.
+    pub fn maximized_pane_mut(&mut self) -> Option<&mut Pane> {
+        let id = self.maximized_pane?;
+        self.panes.iter_mut().find(|p| p.id == id)
     }
 }
 
@@ -254,7 +319,12 @@ mod tests {
     use crate::pane::Pane;
 
     fn make_rect() -> Rect {
-        Rect { x: 0, y: 0, width: 80, height: 24 }
+        Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        }
     }
 
     #[test]
@@ -336,11 +406,34 @@ mod tests {
     #[test]
     fn test_relayout() {
         let mut tab = Tab::new(TabId(1), "test".into());
-        tab.add_pane(Pane::new_bare(PaneId(1), Rect { x: 0, y: 0, width: 40, height: 12 }));
-        tab.add_pane(Pane::new_bare(PaneId(2), Rect { x: 0, y: 0, width: 40, height: 12 }));
-        tab.layout = Layout::VerticalSplit { ratios: vec![0.5, 0.5] };
+        tab.add_pane(Pane::new_bare(
+            PaneId(1),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 12,
+            },
+        ));
+        tab.add_pane(Pane::new_bare(
+            PaneId(2),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 12,
+            },
+        ));
+        tab.layout = Layout::VerticalSplit {
+            ratios: vec![0.5, 0.5],
+        };
 
-        let area = Rect { x: 0, y: 0, width: 100, height: 30 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 30,
+        };
         tab.relayout(area);
 
         assert_eq!(tab.panes[0].rect.width, 50);

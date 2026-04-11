@@ -41,6 +41,9 @@ pub struct FileBrowserState {
     pub search_results: Vec<usize>,
     pub search_result_paths: Vec<PathBuf>,
     pub search_cursor: usize,
+    // ── Preview ──
+    /// Preview content for the currently selected file (first few lines or metadata)
+    pub preview: Option<String>,
 }
 
 impl FileBrowserState {
@@ -60,6 +63,7 @@ impl FileBrowserState {
             search_results: Vec::new(),
             search_result_paths: Vec::new(),
             search_cursor: 0,
+            preview: None,
         };
         state.refresh_root();
         state
@@ -94,10 +98,7 @@ impl FileBrowserState {
 
                 // Skip hidden files/folders starting with .
                 // (but show them — desktop should show everything)
-                let is_symlink = entry
-                    .file_type()
-                    .map(|ft| ft.is_symlink())
-                    .unwrap_or(false);
+                let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
                 let is_dir = path.is_dir();
 
                 let fs_entry = FsEntry {
@@ -124,7 +125,8 @@ impl FileBrowserState {
         // Find insertion point (after parent entries at this depth)
         let insert_at = self.entries.len();
         for entry in dirs {
-            self.entries.insert(insert_at + self.entries.len() - insert_at, entry);
+            self.entries
+                .insert(insert_at + self.entries.len() - insert_at, entry);
         }
         for entry in files {
             self.entries.push(entry);
@@ -138,6 +140,74 @@ impl FileBrowserState {
             self.cursor = 0;
             self.scroll_offset = 0;
             self.refresh_root();
+        }
+    }
+
+    /// Load preview for the currently selected entry.
+    pub fn load_preview(&mut self) {
+        if self.cursor >= self.entries.len() {
+            self.preview = None;
+            return;
+        }
+
+        let entry = &self.entries[self.cursor];
+
+        // Don't preview directories or parent entry
+        if entry.is_dir {
+            if entry.name == ".." {
+                self.preview = Some(format!("Parent directory: {}", entry.path.display()));
+            } else {
+                // Show directory info: number of items
+                match std::fs::read_dir(&entry.path) {
+                    Ok(entries) => {
+                        let count = entries.count();
+                        self.preview = Some(format!("Directory: {} items", count));
+                    }
+                    Err(_) => {
+                        self.preview = Some("Directory (access denied)".to_string());
+                    }
+                }
+            }
+            return;
+        }
+
+        // Try to read first few lines of the file
+        match std::fs::read_to_string(&entry.path) {
+            Ok(content) => {
+                let lines: Vec<&str> = content.lines().take(10).collect();
+                if lines.is_empty() {
+                    self.preview = Some("(empty file)".to_string());
+                } else {
+                    // Truncate long lines
+                    let preview_lines: Vec<String> = lines
+                        .iter()
+                        .map(|line| {
+                            if line.len() > 60 {
+                                format!("{}...", &line[..57])
+                            } else {
+                                line.to_string()
+                            }
+                        })
+                        .collect();
+                    self.preview = Some(preview_lines.join("\n"));
+                }
+            }
+            Err(_) => {
+                // Not a text file or access denied - show file size instead
+                if let Ok(metadata) = std::fs::metadata(&entry.path) {
+                    let size = metadata.len();
+                    let size_str = if size < 1024 {
+                        format!("{} B", size)
+                    } else if size < 1024 * 1024 {
+                        format!("{:.1} KB", size as f64 / 1024.0)
+                    } else {
+                        format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
+                    };
+                    self.preview = Some(format!("Binary file ({})", size_str));
+                } else {
+                    self.preview = Some("(cannot read file)".to_string());
+                }
+            }
         }
     }
 
@@ -168,9 +238,7 @@ impl FileBrowserState {
             self.entries[self.cursor].expanded = false;
             let remove_start = self.cursor + 1;
             let mut remove_end = remove_start;
-            while remove_end < self.entries.len()
-                && self.entries[remove_end].depth > entry_depth
-            {
+            while remove_end < self.entries.len() && self.entries[remove_end].depth > entry_depth {
                 remove_end += 1;
             }
             self.entries.drain(remove_start..remove_end);
@@ -186,10 +254,7 @@ impl FileBrowserState {
                 for e in entries.flatten() {
                     let path = e.path();
                     let name = e.file_name().to_string_lossy().to_string();
-                    let is_symlink = e
-                        .file_type()
-                        .map(|ft| ft.is_symlink())
-                        .unwrap_or(false);
+                    let is_symlink = e.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
                     let is_dir = path.is_dir();
 
                     let fs_entry = FsEntry {
@@ -434,27 +499,27 @@ fn file_icon(entry: &FsEntry) -> &'static str {
         .and_then(|e| e.to_str())
         .unwrap_or("");
     match ext.to_lowercase().as_str() {
-        "rs" => "\u{e7a8} ",    // Rust
-        "py" => "\u{e73c} ",    // Python
-        "js" | "jsx" => "\u{e74e} ", // JavaScript
-        "ts" | "tsx" => "\u{e628} ", // TypeScript
-        "html" | "htm" => "\u{e736} ", // HTML
-        "css" | "scss" => "\u{e749} ", // CSS
-        "json" => "\u{e60b} ",  // JSON
-        "toml" | "yaml" | "yml" => "\u{e615} ", // Config
-        "md" => "\u{e73e} ",    // Markdown
-        "txt" => "\u{f0f6} ",   // Text
-        "sh" | "bash" | "zsh" => "\u{f489} ", // Shell
-        "exe" | "msi" => "\u{f013} ", // Executable
-        "zip" | "tar" | "gz" | "7z" | "rar" => "\u{f1c6} ", // Archive
+        "rs" => "\u{e7a8} ",                                           // Rust
+        "py" => "\u{e73c} ",                                           // Python
+        "js" | "jsx" => "\u{e74e} ",                                   // JavaScript
+        "ts" | "tsx" => "\u{e628} ",                                   // TypeScript
+        "html" | "htm" => "\u{e736} ",                                 // HTML
+        "css" | "scss" => "\u{e749} ",                                 // CSS
+        "json" => "\u{e60b} ",                                         // JSON
+        "toml" | "yaml" | "yml" => "\u{e615} ",                        // Config
+        "md" => "\u{e73e} ",                                           // Markdown
+        "txt" => "\u{f0f6} ",                                          // Text
+        "sh" | "bash" | "zsh" => "\u{f489} ",                          // Shell
+        "exe" | "msi" => "\u{f013} ",                                  // Executable
+        "zip" | "tar" | "gz" | "7z" | "rar" => "\u{f1c6} ",            // Archive
         "png" | "jpg" | "jpeg" | "gif" | "svg" | "bmp" => "\u{f1c5} ", // Image
-        "mp4" | "avi" | "mkv" | "mov" => "\u{f1c8} ", // Video
-        "mp3" | "wav" | "flac" | "ogg" => "\u{f1c7} ", // Audio
-        "pdf" => "\u{f1c1} ",   // PDF
-        "doc" | "docx" => "\u{f1c2} ", // Word
-        "lock" => "\u{f023} ",  // Lock
-        "git" | "gitignore" => "\u{f1d3} ", // Git
-        _ => "\u{f15b} ",       // Generic file
+        "mp4" | "avi" | "mkv" | "mov" => "\u{f1c8} ",                  // Video
+        "mp3" | "wav" | "flac" | "ogg" => "\u{f1c7} ",                 // Audio
+        "pdf" => "\u{f1c1} ",                                          // PDF
+        "doc" | "docx" => "\u{f1c2} ",                                 // Word
+        "lock" => "\u{f023} ",                                         // Lock
+        "git" | "gitignore" => "\u{f1d3} ",                            // Git
+        _ => "\u{f15b} ",                                              // Generic file
     }
 }
 
@@ -472,23 +537,23 @@ impl<'a> FileBrowserWidget<'a> {
 
 impl<'a> Widget for FileBrowserWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let bg = Color::Rgb(24, 24, 37);          // Catppuccin mantle
-        let surface = Color::Rgb(30, 30, 46);     // Catppuccin base
+        let bg = Color::Rgb(24, 24, 37); // Catppuccin mantle
+        let surface = Color::Rgb(30, 30, 46); // Catppuccin base
         let border_color = if self.focused {
-            Color::Rgb(137, 180, 250)              // Catppuccin blue
+            Color::Rgb(137, 180, 250) // Catppuccin blue
         } else {
-            Color::Rgb(69, 71, 90)                 // Catppuccin surface1
+            Color::Rgb(69, 71, 90) // Catppuccin surface1
         };
         let text_color = Color::Rgb(205, 214, 244); // Catppuccin text
         let dir_color = Color::Rgb(137, 180, 250); // Catppuccin blue
         let file_color = Color::Rgb(166, 173, 200); // Catppuccin subtext0
         let link_color = Color::Rgb(203, 166, 247); // Catppuccin mauve
-        let cursor_bg = Color::Rgb(69, 71, 90);   // Catppuccin surface1
-        let dim = Color::Rgb(88, 91, 112);        // Catppuccin overlay0
-        let green = Color::Rgb(166, 227, 161);    // Catppuccin green
-        let yellow = Color::Rgb(249, 226, 175);   // Catppuccin yellow (search match)
-        let red = Color::Rgb(243, 139, 168);      // Catppuccin red
-        // Search bar occupies the last row when search is active
+        let cursor_bg = Color::Rgb(69, 71, 90); // Catppuccin surface1
+        let dim = Color::Rgb(88, 91, 112); // Catppuccin overlay0
+        let green = Color::Rgb(166, 227, 161); // Catppuccin green
+        let yellow = Color::Rgb(249, 226, 175); // Catppuccin yellow (search match)
+        let red = Color::Rgb(243, 139, 168); // Catppuccin red
+                                             // Search bar occupies the last row when search is active
         let search_row_reserved: u16 = if self.state.search_mode { 1 } else { 0 };
 
         // Fill background
@@ -541,15 +606,20 @@ impl<'a> Widget for FileBrowserWidget<'a> {
 
         // File entries
         let start_y = area.y + 2;
-        let visible_entries = &self.state.entries
-            [self.state.scroll_offset..self.state.entries.len().min(self.state.scroll_offset + content_area_h)];
+        let visible_entries = &self.state.entries[self.state.scroll_offset
+            ..self
+                .state
+                .entries
+                .len()
+                .min(self.state.scroll_offset + content_area_h)];
 
         // Collect search result index set for O(1) highlight lookup
-        let search_match_set: std::collections::HashSet<usize> = if self.state.search_mode && !self.state.search_query.is_empty() {
-            self.state.search_results.iter().copied().collect()
-        } else {
-            std::collections::HashSet::new()
-        };
+        let search_match_set: std::collections::HashSet<usize> =
+            if self.state.search_mode && !self.state.search_query.is_empty() {
+                self.state.search_results.iter().copied().collect()
+            } else {
+                std::collections::HashSet::new()
+            };
 
         for (i, entry) in visible_entries.iter().enumerate() {
             let abs_idx = self.state.scroll_offset + i;
@@ -591,9 +661,15 @@ impl<'a> Widget for FileBrowserWidget<'a> {
             let name_style = if entry.name == ".." {
                 Style::default().fg(dim).bg(row_bg)
             } else if is_search_selected {
-                Style::default().fg(bg).bg(yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(bg)
+                    .bg(yellow)
+                    .add_modifier(Modifier::BOLD)
             } else if is_search_match {
-                Style::default().fg(yellow).bg(row_bg).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(yellow)
+                    .bg(row_bg)
+                    .add_modifier(Modifier::BOLD)
             } else if entry.is_dir {
                 Style::default()
                     .fg(dir_color)
@@ -609,7 +685,11 @@ impl<'a> Widget for FileBrowserWidget<'a> {
             };
 
             // Cursor indicator
-            let cursor_indicator = if is_cursor && self.focused { "\u{25b8}" } else { " " };
+            let cursor_indicator = if is_cursor && self.focused {
+                "\u{25b8}"
+            } else {
+                " "
+            };
             let cursor_style = Style::default().fg(green).bg(row_bg);
             buf.set_string(area.x, y, cursor_indicator, cursor_style);
 
@@ -632,8 +712,7 @@ impl<'a> Widget for FileBrowserWidget<'a> {
             cx += icon.chars().count() as u16;
 
             // File/folder name (truncate if needed)
-            let max_name_len = (area.x + area.width)
-                .saturating_sub(cx + 1) as usize; // -1 for the right border
+            let max_name_len = (area.x + area.width).saturating_sub(cx + 1) as usize; // -1 for the right border
             let display_name = if entry.name.len() > max_name_len {
                 format!("{}...", &entry.name[..max_name_len.saturating_sub(3)])
             } else {
@@ -646,11 +725,54 @@ impl<'a> Widget for FileBrowserWidget<'a> {
         if self.state.entries.len() > content_area_h && content_area_h > 0 {
             let scroll_pct = self.state.scroll_offset as f64
                 / (self.state.entries.len().saturating_sub(content_area_h)) as f64;
-            let sb_y = start_y
-                + (scroll_pct * (content_area_h.saturating_sub(1)) as f64) as u16;
+            let sb_y = start_y + (scroll_pct * (content_area_h.saturating_sub(1)) as f64) as u16;
             if sb_y < area.y + area.height {
                 let sb_style = Style::default().fg(dim).bg(bg);
                 buf.set_string(right_x, sb_y, "\u{2588}", sb_style); // █ scrollbar thumb
+            }
+        }
+
+        // ── Preview panel (if space available and not in search mode) ──────
+        if !self.state.search_mode && area.height > 10 {
+            if let Some(ref preview_text) = self.state.preview {
+                let preview_height = 4u16; // Reserve 4 lines for preview
+                let preview_start_y = area.y
+                    + area
+                        .height
+                        .saturating_sub(preview_height + search_row_reserved);
+
+                // Separator line
+                let sep_y = preview_start_y.saturating_sub(1);
+                if sep_y > start_y && sep_y < area.y + area.height {
+                    let sep_str = "\u{2500}".repeat(inner_w); // ─
+                    let sep_style = Style::default().fg(dim).bg(bg);
+                    buf.set_string(area.x, sep_y, &sep_str, sep_style);
+                }
+
+                // Preview label
+                let preview_label = " Preview ";
+                let label_style = Style::default()
+                    .fg(text_color)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD);
+                buf.set_string(area.x, preview_start_y, preview_label, label_style);
+
+                // Preview content (up to 3 lines)
+                let preview_lines: Vec<&str> = preview_text.lines().take(3).collect();
+                for (i, line) in preview_lines.iter().enumerate() {
+                    let py = preview_start_y + 1 + i as u16;
+                    if py >= area.y + area.height {
+                        break;
+                    }
+                    let truncated = if line.len() > inner_w.saturating_sub(1) {
+                        &line[..inner_w.saturating_sub(1)]
+                    } else {
+                        line
+                    };
+                    let preview_style = Style::default().fg(file_color).bg(bg);
+                    let padded = format!("{:<width$}", truncated, width = inner_w);
+                    buf.set_string(area.x, py, &padded, preview_style);
+                }
             }
         }
 
@@ -664,7 +786,11 @@ impl<'a> Widget for FileBrowserWidget<'a> {
             };
             let label_style = Style::default()
                 .fg(bg)
-                .bg(if self.state.search_recursive { red } else { green })
+                .bg(if self.state.search_recursive {
+                    red
+                } else {
+                    green
+                })
                 .add_modifier(Modifier::BOLD);
             buf.set_string(area.x, sb_y, mode_label, label_style);
             let qx = area.x + mode_label.chars().count() as u16;
@@ -686,13 +812,9 @@ impl<'a> Widget for FileBrowserWidget<'a> {
                 self.state.search_results.len()
             };
             if result_count > 0 {
-                let count_str = format!(
-                    "{}/{} Tab=rec",
-                    self.state.search_cursor + 1,
-                    result_count
-                );
-                let count_x = (area.x + area.width)
-                    .saturating_sub(count_str.len() as u16 + 1);
+                let count_str =
+                    format!("{}/{} Tab=rec", self.state.search_cursor + 1, result_count);
+                let count_x = (area.x + area.width).saturating_sub(count_str.len() as u16 + 1);
                 let count_style = Style::default()
                     .fg(yellow)
                     .bg(cursor_bg)

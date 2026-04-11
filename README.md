@@ -1,78 +1,78 @@
-### Überblick über die App: Super-Terminal
+### App Overview: Super-Terminal
 
-Die "Super-Terminal" ist eine hochmodulare, erweiterbare Terminal-Anwendung, die als hybrider Terminal-Emulator und Multiplexer konzipiert ist. Sie orientiert sich stark an Ghostty als performantem, GPU-beschleunigtem Terminal-Emulator und Zellij als intuitivem Terminal-Workspace mit Pane-Management und Plugin-System. Das Ziel ist es, einen "Terminal Desktop" zu schaffen – eine Umgebung, in der der Benutzer mehrere Terminal-Fenster (Panes) frei verschieben, skalieren, gruppieren oder unabhängig voneinander nutzen kann, ähnlich wie in einem grafischen Desktop. Die App läuft nativ auf Windows und Linux, mit Fokus auf Geschwindigkeit, Stabilität und Erweiterbarkeit durch Plugins. 
+"Super-Terminal" is a highly modular, extensible terminal application designed as a hybrid terminal emulator and multiplexer. It draws heavily from Ghostty as a performant, GPU-accelerated terminal emulator and Zellij as an intuitive terminal workspace with pane management and plugin system. The goal is to create a "Terminal Desktop" – an environment where users can freely move, scale, group, or use multiple terminal windows (panes) independently, similar to a graphical desktop. The app runs natively on Windows and Linux, with a focus on speed, stability, and extensibility through plugins.
 
-Im Kern kombiniert sie die Emulationsstärke von Ghostty (z. B. standards-konforme Terminal-Sequenzen, GPU-Rendering für flüssige Darstellung) mit dem Multiplexing von Zellij (z. B. Sessions, Panes und kollaborative Features). Der einzigartige Twist: Ein offenes Plugin-Ökosystem, das den Terminal zu einem vielseitigen Tool macht, das über klassische Shell-Befehle hinausgeht – von Netzwerk-Tools bis hin zu Blockchain-Integrationen.
+At its core, it combines Ghostty's emulation strengths (e.g., standards-compliant terminal sequences, GPU rendering for smooth display) with Zellij's multiplexing (e.g., sessions, panes, and collaborative features). The unique twist: an open plugin ecosystem that makes the terminal a versatile tool beyond classic shell commands – from network tools to blockchain integrations.
 
-### Ziele und Anforderungen
-- **Zielgruppe**: Entwickler, SysAdmins, Power-User und Enthusiasten, die eine zentrale App für Terminal-Arbeit, Netzwerk-Management und erweiterte Funktionen brauchen.
-- **Plattform-Support**: 
-  - Windows (via WinAPI oder Cross-Platform-Bibliotheken wie crossterm).
-  - Linux (via GTK oder direkte TTY-Integration).
-  - Kein macOS-Support, um den Fokus auf die angeforderten Plattformen zu legen.
-- **Leitprinzipien**: 
-  - Hohe Performance: GPU-Acceleration für Rendering, dedizierte Threads für I/O.
-  - Modularität: Kernfunktionen minimal, Erweiterungen via Plugins.
-  - Benutzerfreundlichkeit: Intuitive Steuerung (Tastenkürzel, Maus-Support), ohne Überladung.
-  - Sicherheit: Plugins in Sandbox (z. B. WebAssembly) ausführen, um Risiken zu minimieren.
-- **Nicht-Ziele**: Keine vollständige GUI-Desktop-Ersetzung; bleibt textbasiert, aber mit visuellen Hilfen wie Splits und Overlays.
+### Goals and Requirements
+- **Target Audience**: Developers, SysAdmins, Power-Users, and enthusiasts who need a central app for terminal work, network management, and advanced features.
+- **Platform Support**: 
+  - Windows (via WinAPI or cross-platform libraries like crossterm).
+  - Linux (via GTK or direct TTY integration).
+  - No macOS support to focus on the requested platforms.
+- ** guiding Principles**: 
+  - High Performance: GPU acceleration for rendering, dedicated threads for I/O.
+  - Modularity: Core features minimal, extensions via plugins.
+  - User-Friendliness: Intuitive controls (keyboard shortcuts, mouse support), without clutter.
+  - Security: Run plugins in sandbox (e.g., WebAssembly) to minimize risks.
+- **Non-Goals**: No full GUI desktop replacement; remains text-based but with visual aids like splits and overlays.
 
-### Kernfeatures
-Basierend auf Ghostty und Zellij integriert die App folgende Basisfunktionen:
-- **Terminal-Emulation**: Vollständige Unterstützung für ANSI/ECMA-48-Sequenzen, Ligaturen, Farben und Unicode. GPU-Rendering (OpenGL auf Linux, DirectX auf Windows) für niedrige Latenz, ähnlich Ghostty. Dedizierter I/O-Thread, um Jitter bei hoher Last zu vermeiden.
-- **Pane-Management (Terminal Desktop)**: 
-  - Frei verschiebbare Panes: Benutzer können Panes drag-and-drop verschieben, resizen oder stapeln (stacked/floating wie in Zellij).
-  - Separat oder simultan nutzen: Panes können unabhängig laufen (z. B. ein Pane für SSH, eines für Code-Editing) oder synchronisiert werden (z. B. Broadcast-Modus für Befehle in mehreren Panes).
-  - Sessions: Persistente Sessions, die bei Neustart wiederhergestellt werden können, mit Multi-Client-Support für Kollaboration.
-- **UI-Elemente**: Tab-Bar, Split-Screens, Maus-Interaktion für Resizing. Konfigurierbar via YAML- oder TOML-Dateien.
-- **Integrierte Tools**: Basis-Shell-Integration (Bash, Zsh, PowerShell auf Windows), Suchfunktion über Panes hinweg und Crash-Reporting.
+### Core Features
+Based on Ghostty and Zellij, the app includes the following base functionality:
+- **Terminal Emulation**: Full support for ANSI/ECMA-48 sequences, ligatures, colors, and Unicode. GPU rendering (OpenGL on Linux, DirectX on Windows) for low latency, similar to Ghostty. Dedicated I/O thread to avoid jitter under high load.
+- **Pane Management (Terminal Desktop)**: 
+  - Freely movable panes: Users can drag-and-drop, resize, or stack panes (stacked/floating like in Zellij).
+  - Use separately or simultaneously: Panes can run independently (e.g., one pane for SSH, one for code editing) or be synchronized (e.g., broadcast mode for commands in multiple panes).
+  - Sessions: Persistent sessions that can be restored on restart, with multi-client support for collaboration.
+- **UI Elements**: Tab bar, split screens, mouse interaction for resizing. Configurable via YAML or TOML files.
+- **Integrated Tools**: Base shell integration (Bash, Zsh, PowerShell on Windows), search across panes, and crash reporting.
 
-### Plugin-System
-Das Herzstück der App: Ein flexibles, herunterladbares Plugin-System, inspiriert von Zellijs WebAssembly-Plugins. Plugins erweitern die App dynamisch, ohne Neukompilierung. 
+### Plugin System
+The heart of the app: A flexible, downloadable plugin system, inspired by Zellij's WebAssembly plugins. Plugins extend the app dynamically without recompilation.
 
-- **Wie es funktioniert**:
-  - **Installation**: Plugins als WASM-Module herunterladen (z. B. von einem zentralen Repository wie GitHub oder einem dedizierten Store). Einfaches Hinzufügen via Befehl: `super-terminal plugin add <url oder name>`.
-  - **Integration**: Plugins laden sich in dedizierte Panes oder Overlays. Sie können auf App-APIs zugreifen (z. B. für I/O, Netzwerk oder UI-Elemente), aber in einer Sandbox (WebAssembly) laufen, um Sicherheit zu gewährleisten.
-  - **Entwicklung**: Plugins in beliebigen Sprachen (Rust, JS, etc.), die zu WASM kompilieren. API für Hooks (z. B. on-load, on-command).
-  - **Management**: Plugin-Manager im Terminal: Liste, Update, Deinstallieren. Automatische Updates optional.
+- **How it works**:
+  - **Installation**: Download plugins as WASM modules (e.g., from a central repository like GitHub or a dedicated store). Simply add via command: `super-terminal plugin add <url or name>`.
+  - **Integration**: Plugins load into dedicated panes or overlays. They can access app APIs (e.g., for I/O, network, or UI elements), but run in a sandbox (WebAssembly) to ensure security.
+  - **Development**: Plugins in any language (Rust, JS, etc.) that compiles to WASM. API for hooks (e.g., on-load, on-command).
+  - **Management**: Plugin manager in terminal: list, update, uninstall. Automatic updates optional.
 
-- **Beispiel-Plugins** (basierend auf deinen Vorschlägen; erweiterbar):
-  | Plugin-Name | Beschreibung | Funktionen | Integration |
-  |-------------|--------------|------------|-------------|
-  | Bluetooth Messaging | Ermöglicht Messaging über Bluetooth-Geräte. | Scannen/Verbinden mit Geräten, Senden/Empfangen von Nachrichten, Datei-Übertragung. | Pane für Geräte-Liste; nutzt OS-Bluetooth-APIs (z. B. BlueZ auf Linux, Windows Bluetooth API). |
-  | Mesh & WLAN Messaging | Peer-to-Peer-Messaging über Mesh-Netzwerke oder WLAN. | Erstellen/Beitreten von Meshes, verschlüsselte Chats, Offline-Messaging. | Integriert mit Netzwerk-Stack; Pane für Chat-Interface. |
-  | Midnight Blockchain Integration | Wallet und private Transaktionen auf der Midnight-Sidechain (Cardano-basiert mit ZK-Proofs für Privacy). | Wallet-Management, private Überweisungen, Dust-Handling (kleine Beträge), NIGHT-Token-Support. | Sichere Key-Storage; Pane für Transaktions-Übersicht, Integration mit Midnight-API für ZK-SNARKs. |
-  | Text/Code Editor | Eingebauter Editor für Dateien. | Syntax-Highlighting, Auto-Complete, Multi-File-Editing. | Vim/Emacs-ähnlich, aber in Pane integriert; nutzt Tree-Sitter für Parsing. |
-  | File Sharing | Sicheres Teilen von Dateien. | Upload/Download via Links, P2P-Übertragung, Verschlüsselung. | Drag-and-Drop in Panes; Integration mit IPFS oder ähnlich. |
-  | Network Tools | Suite für Netzwerk-Diagnose. | Ping, Traceroute, Port-Scan, WiFi-Analyse. | Kommando-basiert, mit visuellen Graphs in Panes. |
-  | SSH Tools | Erweiterte SSH-Management. | Multi-Session-SSH, Key-Management, Tunneling. | Automatische Verbindungen in separaten Panes. |
-  | Converter | Universal-Konverter. | Währungen, Einheiten, Dateiformate, Crypto-Conversions. | Interaktives Pane; erweiterbar via Sub-Plugins. |
+- **Example Plugins** (based on your suggestions; extensible):
+  | Plugin Name | Description | Features | Integration |
+  |-------------|-------------|----------|-------------|
+  | Bluetooth Messaging | Enables messaging via Bluetooth devices. | Scan/connect to devices, send/receive messages, file transfer. | Pane for device list; uses OS Bluetooth APIs (e.g., BlueZ on Linux, Windows Bluetooth API). |
+  | Mesh & WLAN Messaging | Peer-to-peer messaging via mesh networks or WLAN. | Create/join meshes, encrypted chats, offline messaging. | Integrated with network stack; Pane for chat interface. |
+  | Midnight Blockchain Integration | Wallet and private transactions on the Midnight sidechain (Cardano-based with ZK-Proofs for privacy). | Wallet management, private transfers, dust handling (small amounts), NIGHT token support. | Secure key storage; Pane for transaction overview, integration with Midnight API for ZK-SNARKs. |
+  | Text/Code Editor | Built-in editor for files. | Syntax highlighting, auto-complete, multi-file editing. | Vim/Emacs-like, but integrated in pane; uses Tree-Sitter for parsing. |
+  | File Sharing | Secure file sharing. | Upload/download via links, P2P transfer, encryption. | Drag-and-drop in panes; integration with IPFS or similar. |
+  | Network Tools | Network diagnostics suite. | Ping, traceroute, port scan, WiFi analysis. | Command-based, with visual graphs in panes. |
+  | SSH Tools | Advanced SSH management. | Multi-session SSH, key management, tunneling. | Automatic connections in separate panes. |
+  | Converter | Universal converter. | Currencies, units, file formats, crypto conversions. | Interactive pane; extensible via sub-plugins. |
 
-Diese Plugins machen den Terminal zu einem "Super-Tool", das über reine Kommando-Ausführung hinausgeht – z. B. ein Plugin könnte ein Pane in einen Chat-Client oder Wallet verwandeln.
+These plugins turn the terminal into a "super tool" that goes beyond pure command execution – for example, a plugin could transform a pane into a chat client or wallet.
 
-### Architektur
-- **Sprache und Frameworks**: Rust als Kernsprache (wie Zellij), für Cross-Platform-Support und Sicherheit. Bibliotheken: crossterm für TTY, wgpu für GPU-Rendering, wasmtime für WASM-Plugins.
-- **Modulare Struktur**:
-  - **Core**: Terminal-Emulator (inspiriert von Ghosttys libghostty), handhabt Parsing, Rendering und I/O.
-  - **Multiplexer**: Pane- und Session-Manager (ähnlich Zellij), mit Event-Loop für Interaktionen.
-  - **Plugin-Engine**: WASM-Runtime, API-Exposer.
-  - **Platform-Layer**: Abstraktion für Windows (WinAPI) und Linux (GTK/TTY).
-- **Datenfluss**: Zentrale Event-Loop verarbeitet Eingaben, rendert Panes parallel und delegiert an Plugins.
-- **Sicherheit**: Plugins isoliert, keine direkten OS-Zugriffe ohne Erlaubnis; ZK-Proofs in Midnight-Plugin für Privacy.
+### Architecture
+- **Language and Frameworks**: Rust as the core language (like Zellij), for cross-platform support and security. Libraries: crossterm for TTY, wgpu for GPU rendering, wasmtime for WASM plugins.
+- **Modular Structure**:
+  - **Core**: Terminal emulator (inspired by Ghostty's libghostty), handles parsing, rendering, and I/O.
+  - **Multiplexer**: Pane and session manager (similar to Zellij), with event loop for interactions.
+  - **Plugin-Engine**: WASM runtime, API exposer.
+  - **Platform-Layer**: Abstraction for Windows (WinAPI) and Linux (GTK/TTY).
+- **Data Flow**: Central event loop processes inputs, renders panes in parallel, and delegates to plugins.
+- **Security**: Plugins isolated, no direct OS access without permission; ZK-proofs in Midnight plugin for privacy.
 
-### Entwicklungsschritte
-1. **Prototyping**: Basis-Emulator in Rust implementieren, mit einfachem Pane-Splitting.
-2. **Plattform-Portierung**: Linux zuerst (einfacher), dann Windows-Integration.
-3. **Plugin-System**: WASM-Integration hinzufügen, mit Beispiel-Plugins.
-4. **Features erweitern**: Bluetooth/WLAN via OS-APIs, Midnight via Cardano-SDK.
-5. **Testing**: Unit-Tests für Emulation, Integration-Tests für Plugins; Cross-Platform-Builds mit CI (GitHub Actions).
-6. **Release**: Open-Source auf GitHub, Binaries für Windows/Linux.
+### Development Steps
+1. **Prototyping**: Implement base emulator in Rust, with simple pane splitting.
+2. **Platform Porting**: Linux first (simpler), then Windows integration.
+3. **Plugin System**: Add WASM integration, with example plugins.
+4. **Feature Expansion**: Bluetooth/WLAN via OS APIs, Midnight via Cardano SDK.
+5. **Testing**: Unit tests for emulation, integration tests for plugins; Cross-platform builds with CI (GitHub Actions).
+6. **Release**: Open-source on GitHub, binaries for Windows/Linux.
 
-### Potenzielle Challenges und Lösungen
-- **Cross-Platform**: Unterschiede in APIs (z. B. Bluetooth) – Lösen durch Abstraktions-Layer (z. B. rust-bluetooth-Crate).
-- **Performance**: GPU auf Windows – Nutze wgpu für einheitliches Rendering.
-- **Sicherheit bei Plugins**: WASM-Sandboxing verhindert Missbrauch; User-Confirm für sensible Zugriffe.
-- **Blockchain-Integration**: Midnight ist privacy-fokussiert mit ZK-SNARKs; Stelle sichere Wallet-Handling sicher, ohne Keys zu exponieren.
-- **Community**: Fördere Plugin-Entwicklung durch Docs und ein Repo für Beiträge.
+### Potential Challenges and Solutions
+- **Cross-Platform**: Differences in APIs (e.g., Bluetooth) – solve via abstraction layer (e.g., rust-bluetooth crate).
+- **Performance**: GPU on Windows – use wgpu for unified rendering.
+- **Security for Plugins**: WASM sandboxing prevents abuse; user confirm for sensitive accesses.
+- **Blockchain Integration**: Midnight is privacy-focused with ZK-SNARKs; ensure secure wallet handling without exposing keys.
+- **Community**: Encourage plugin development through docs and a repo for contributions.
 
-Diese Planung bietet eine solide Basis – bei Bedarf kann ich Details zu einem bestimmten Aspekt vertiefen!
+This planning provides a solid base – if needed, I can dive deeper into any specific aspect!
