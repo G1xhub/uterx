@@ -49,6 +49,19 @@ super-terminal plugin remove <name>
 
 Plugins can be written in any language that compiles to WASM (Rust, JS, …). A hook-based API is provided (`on-load`, `on-command`, etc.). Plugins load into dedicated panes or overlays and can access app APIs for I/O, networking, and UI.
 
+### Available Plugins
+
+| Plugin | Description |
+|--------|-------------|
+| **Bluetooth Messaging** | Scan/connect devices, send/receive messages, file transfer via OS Bluetooth APIs (BlueZ / Windows Bluetooth API) |
+| **Mesh & WLAN Messaging** | Peer-to-peer encrypted chat over mesh/WLAN networks with offline support |
+| **Midnight Blockchain** | Wallet management and private transactions on the Midnight sidechain (Cardano, ZK-SNARKs, NIGHT token) |
+| **Text/Code Editor** | Syntax highlighting, auto-complete, multi-file editing — powered by Tree-sitter |
+| **File Sharing** | Encrypted P2P file sharing (IPFS integration), drag-and-drop |
+| **Network Tools** | Ping, traceroute, port scanning, WiFi analysis with visual graphs |
+| **SSH Tools** | Multi-session SSH, key management, tunneling in dedicated panes |
+| **Converter** | Currencies, units, file formats, crypto conversions — extensible via sub-plugins |
+
 ---
 
 ## Architecture
@@ -98,9 +111,12 @@ Pre-built binaries for Windows and Linux are available on the [Releases](https:/
 
 ## Roadmap
 
+- [ ] Base emulator with pane splitting
+- [ ] Linux support (GTK/TTY)
+- [ ] Windows support (WinAPI)
 - [ ] WASM plugin system + example plugins
 - [ ] Bluetooth & WLAN plugins via OS APIs
-- [ ] Cardano blockchain plugin via Cardano SDK
+- [ ] Midnight blockchain plugin via Cardano SDK
 - [ ] CI pipeline with cross-platform builds (GitHub Actions)
 - [ ] Public release — open source, Windows & Linux binaries
 
